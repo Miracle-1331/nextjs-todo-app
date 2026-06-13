@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - db-migrate-job.yaml
+
+# Generates the ConfigMap from every SQL file in migrations/.
+# Adding V2__*.sql, V3__*.sql etc. here is all that's needed — no other file changes.
+configMapGenerator:
+  - name: todo-app-migrations
+    files:
+      - ../migrations/V1__create_todos.sql
+    options:
+      disableNameSuffixHash: true

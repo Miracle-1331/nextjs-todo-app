@@ -1,0 +1,64 @@
+services:
+
+  # ── Postgres ───────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       todos
+      POSTGRES_USER:     todos_user
+      POSTGRES_PASSWORD: todos_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U todos_user -d todos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── Flyway: versioned migration runner ────────────────────────────────────
+  flyway:
+    image: flyway/flyway:10-alpine
+    restart: "no"
+    command: migrate
+    environment:
+      FLYWAY_URL:      jdbc:postgresql://db:5432/todos
+      FLYWAY_USER:     todos_user
+      FLYWAY_PASSWORD: todos_pass
+      FLYWAY_SCHEMAS:  public
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./migrations:/flyway/sql:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ── Next.js app ────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL:      postgresql://todos_user:todos_pass@db:5432/todos
+      NODE_ENV:          production
+      ALLOW_E2E_RESET:   "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      flyway:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/api/health',r=>process.exit(r.statusCode===200?0:1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres_data:
