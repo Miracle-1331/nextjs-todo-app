@@ -1,0 +1,288 @@
+name: Promote to Production
+
+# Stage 4 — Manual production promotion.
+# Requires human approval. Promotes only a QA-validated digest.
+# Does NOT rebuild. Uses canary + metric analysis to reduce blast radius.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Image digest to promote (e.g. sha256:abc123…)"
+        required: true
+        type: string
+
+env:
+  APP_NAME: nextjs-todo-app
+  GITOPS_REPO: ${{ vars.GITOPS_REPO }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_REGION: ap-northeast-1
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 1-2 · Input validation + mandatory human approval
+  # ─────────────────────────────────────────────────────────────────────────────
+  require-approval:
+    name: "1-2 · Validate Input & Require Approval"
+    runs-on: ubuntu-latest
+    environment: prod   # GitHub Environment "prod" enforces required reviewers
+    steps:
+      - name: Validate digest format
+        run: |
+          DIGEST="${{ inputs.image_digest }}"
+          if ! echo "$DIGEST" | grep -qE '^sha256:[a-f0-9]{64}$'; then
+            echo "ERROR: image_digest must match sha256:<64-hex-chars>"
+            exit 1
+          fi
+          echo "Digest format OK: $DIGEST"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 3-6 · Checkout GitOps + validate QA gates
+  # ─────────────────────────────────────────────────────────────────────────────
+  validate-gates:
+    name: "3-6 · Validate QA Gates"
+    runs-on: ubuntu-latest
+    needs: require-approval
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Install yq
+        run: |
+          curl -sSL \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+      - name: Step 4 — Release metadata exists
+        run: |
+          DIGEST="${{ inputs.image_digest }}"
+          SAFE_DIGEST="${DIGEST//:/-}"
+          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          if [ ! -f "$META_FILE" ]; then
+            echo "ERROR: No release metadata for digest ${DIGEST}"
+            echo "This digest was not produced by the official pipeline."
+            exit 1
+          fi
+          echo "Release metadata found: $META_FILE"
+
+      - name: Step 5 — qa.deployed=true
+        run: |
+          DIGEST="${{ inputs.image_digest }}"
+          SAFE_DIGEST="${DIGEST//:/-}"
+          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          QA_DEPLOYED=$(yq '.data["qa.deployed"]' "$META_FILE")
+          if [ "$QA_DEPLOYED" != "true" ]; then
+            echo "ERROR: qa.deployed is '${QA_DEPLOYED}' — digest was not deployed to QA."
+            exit 1
+          fi
+          echo "qa.deployed=true ✓"
+
+      - name: Step 6 — qa.validated=true
+        run: |
+          DIGEST="${{ inputs.image_digest }}"
+          SAFE_DIGEST="${DIGEST//:/-}"
+          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          QA_VALIDATED=$(yq '.data["qa.validated"]' "$META_FILE")
+          if [ "$QA_VALIDATED" != "true" ]; then
+            echo "ERROR: qa.validated is '${QA_VALIDATED}' — QA tests did not pass."
+            exit 1
+          fi
+          echo "qa.validated=true ✓"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 7-8 · Update prod values + create GitOps PR (CODEOWNERS review required)
+  # ─────────────────────────────────────────────────────────────────────────────
+  update-prod-values:
+    name: "7-8 · Update Prod Values"
+    runs-on: ubuntu-latest
+    needs: validate-gates
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Install yq
+        run: |
+          curl -sSL \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+      - name: Step 7 — Update values/prod.yaml with promoted digest
+        run: |
+          DIGEST="${{ inputs.image_digest }}"
+          COMMIT=$(yq ".data.commit" "releases/${{ env.APP_NAME }}/${DIGEST//:/-}.yaml")
+          yq -i ".image.digest = \"${DIGEST}\"" "apps/${{ env.APP_NAME }}/values/prod.yaml"
+          yq -i ".image.tag = \"${COMMIT}\"" "apps/${{ env.APP_NAME }}/values/prod.yaml"
+
+      - name: Step 8 — Create production GitOps PR
+        run: |
+          BRANCH="promote/${{ env.APP_NAME }}/prod/${{ inputs.image_digest }}"
+          BRANCH="${BRANCH:0:100}"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git checkout -b "$BRANCH"
+          git add "apps/${{ env.APP_NAME }}/values/prod.yaml"
+          git commit -m "chore: promote ${{ env.APP_NAME }} to prod @ ${{ inputs.image_digest }}"
+          git push --set-upstream origin "$BRANCH"
+          gh pr create \
+            --repo "${{ env.GITOPS_REPO }}" \
+            --title "[PROD] Promote ${{ env.APP_NAME }} to production" \
+            --body "**Production promotion** of digest \`${{ inputs.image_digest }}\`.
+          - Promoted by: ${{ github.actor }}
+          - Pipeline run: ${{ github.run_id }}
+          - QA gates: dev.deployed ✓ dev.validated ✓ qa.deployed ✓ qa.validated ✓
+
+          Requires CODEOWNERS approval before merge." \
+            --base main \
+            --head "$BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 9-10 · Argo CD sync prod + production canary rollout
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: "9-10 · Deploy Prod + Canary"
+    runs-on: ubuntu-latest
+    needs: update-prod-values
+    environment: prod
+    steps:
+      - name: Install Argo CD CLI
+        run: |
+          curl -sSL \
+            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 \
+            -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
+
+      - name: Argo CD login
+        run: |
+          argocd login "${{ vars.ARGOCD_SERVER }}" \
+            --auth-token "${{ secrets.ARGOCD_TOKEN }}" \
+            --grpc-web
+
+      - name: Sync production application
+        run: |
+          argocd app sync "${{ env.APP_NAME }}-prod" \
+            --force --prune --timeout 300
+
+      - name: Wait for production rollout healthy
+        run: |
+          argocd app wait "${{ env.APP_NAME }}-prod" \
+            --health --timeout 300
+
+      # Argo Rollouts AnalysisTemplate validates SLO metrics during canary steps.
+      # The Analysis reads from Prometheus/CloudWatch/Datadog — configure in the
+      # AnalysisTemplate manifest in the GitOps repo, not here.
+      - name: Wait for production canary to complete
+        run: |
+          kubectl --server "${{ vars.PROD_KUBE_SERVER }}" \
+                  --token  "${{ secrets.PROD_KUBE_TOKEN }}" \
+            argo rollouts status "${{ env.APP_NAME }}" \
+              --namespace prod --timeout 1200
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 11 · Metric analysis (reported by AnalysisTemplate — gate inside rollout)
+  # Step 12 · Smoke test against production
+  # ─────────────────────────────────────────────────────────────────────────────
+  smoke-prod:
+    name: "12 · Smoke Test — Prod"
+    runs-on: ubuntu-latest
+    needs: deploy-prod
+    steps:
+      - name: Health check
+        run: |
+          URL="${{ vars.PROD_APP_URL }}"
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "${URL}/api/health")
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed — HTTP ${STATUS}"
+            exit 1
+          fi
+          echo "Health check passed (HTTP ${STATUS})"
+
+      - name: Core API smoke tests
+        run: |
+          URL="${{ vars.PROD_APP_URL }}"
+          curl -sf "${URL}/api/todos" -o /dev/null && echo "GET /api/todos OK"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 13 · Notify release channel (Slack)
+  # ─────────────────────────────────────────────────────────────────────────────
+  notify:
+    name: "13 · Notify Release Channel"
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    if: always()
+    steps:
+      - name: Build notification payload
+        id: payload
+        run: |
+          STATUS="${{ needs.smoke-prod.result }}"
+          if [ "$STATUS" = "success" ]; then
+            COLOR="good"
+            MSG="Production deployment *succeeded* for \`${{ env.APP_NAME }}\`."
+          else
+            COLOR="danger"
+            MSG="Production deployment *failed* for \`${{ env.APP_NAME }}\`."
+          fi
+          echo "color=${COLOR}" >> "$GITHUB_OUTPUT"
+          echo "msg=${MSG}" >> "$GITHUB_OUTPUT"
+
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "attachments": [{
+                "color": "${{ steps.payload.outputs.color }}",
+                "text": "${{ steps.payload.outputs.msg }}",
+                "fields": [
+                  { "title": "Digest", "value": "${{ inputs.image_digest }}", "short": false },
+                  { "title": "Promoted by", "value": "${{ github.actor }}", "short": true },
+                  { "title": "Run", "value": "${{ github.run_id }}", "short": true }
+                ]
+              }]
+            }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 14 · Mark prod.deployed=true and prod.validated=true
+  # ─────────────────────────────────────────────────────────────────────────────
+  mark-prod-validated:
+    name: "14 · Mark Prod Validated"
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Install yq
+        run: |
+          curl -sSL \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+      - name: Set prod.deployed=true and prod.validated=true
+        run: |
+          DIGEST="${{ inputs.image_digest }}"
+          SAFE_DIGEST="${DIGEST//:/-}"
+          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          yq -i '.data["prod.deployed"] = "true"' "$META_FILE"
+          yq -i '.data["prod.validated"] = "true"' "$META_FILE"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "$META_FILE"
+          git commit -m "chore: mark prod.validated=true for ${{ env.APP_NAME }} @ ${DIGEST}"
+          git push

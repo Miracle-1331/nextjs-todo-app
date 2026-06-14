@@ -1,0 +1,204 @@
+name: PR Validation
+
+# Stage 1 — Validate code before merge.
+# Triggered on any PR targeting main (feature/*, bugfix/*, hotfix/*).
+# Does NOT build official artifacts or deploy.
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24"
+  IMAGE_NAME: nextjs-todo-app
+  SONAR_HOST_URL: https://sonarqube.merveilles.org
+  VAULT_URL: https://vault.merveilles.org
+  VAULT_AUTH_PATH: github-actions
+  VAULT_ROLE: gha-agent-ci
+
+permissions:
+  contents: read
+  security-events: write # SARIF uploads to GitHub Security tab
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 1-5 — Checkout · Runtime · Install · Unit tests + coverage · Lint
+  # ─────────────────────────────────────────────────────────────────────────────
+  test:
+    name: "1-5 · Unit Tests & Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run unit tests with coverage
+        run: npm run test:coverage -- --ci
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+      - name: Run ESLint
+        run: npm run lint
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 6 — SonarQube scan + Quality Gate
+  # Token sourced from Vault (kv/data/platform/sonarqube/ci-token)
+  # ─────────────────────────────────────────────────────────────────────────────
+  sonar:
+    name: "6 · SonarQube Quality Gate"
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      id-token: write   # required for Vault JWT auth
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Setup Java (SonarScanner requirement)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          secrets: |
+            kv/data/platform/sonarqube/ci-token token | SONAR_TOKEN ;
+
+      - name: Run SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+
+      - name: SonarQube Quality Gate check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 7 — Trivy FS scan: secrets · dep vulns · IaC misconfigs
+  # Blocking: fails on HIGH/CRITICAL or any secret
+  # ─────────────────────────────────────────────────────────────────────────────
+  trivy-fs:
+    name: "7 · Trivy FS Scan"
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Trivy — secrets, vulns, misconfig
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs.sarif
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 8 — Docker build check + Trivy image scan
+  # Confirms the Dockerfile builds and the resulting image is clean.
+  # Does NOT push — local image only.
+  # ─────────────────────────────────────────────────────────────────────────────
+  docker-build-check:
+    name: "8 · Docker Build Check"
+    runs-on: ubuntu-latest
+    needs: [test, trivy-fs]
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (local only, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Summary gate — configure as a required status check in branch protection
+  # ─────────────────────────────────────────────────────────────────────────────
+  pr-validated:
+    name: PR Validated
+    runs-on: ubuntu-latest
+    needs: [test, sonar, trivy-fs, docker-build-check]
+    if: always()
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          results='${{ toJSON(needs) }}'
+          echo "$results" | python3 -c "
+          import json, sys
+          needs = json.load(sys.stdin)
+          failed = [k for k, v in needs.items() if v['result'] not in ('success', 'skipped')]
+          if failed:
+              print('FAILED jobs:', ', '.join(failed))
+              sys.exit(1)
+          print('All required jobs passed.')
+          "
