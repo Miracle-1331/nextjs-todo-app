@@ -104,6 +104,9 @@ jobs:
           path: ${{ env.VAULT_AUTH_PATH }}
           role: ${{ env.VAULT_ROLE }}
           jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
             kv/data/platform/sonarqube/ci-token token | SONAR_TOKEN ;
 
