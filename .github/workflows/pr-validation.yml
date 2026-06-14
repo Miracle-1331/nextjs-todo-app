@@ -132,6 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     permissions:
+      contents: read
       security-events: write
     steps:
       - name: Checkout source code
@@ -166,6 +167,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, trivy-fs]
     permissions:
+      contents: read
       security-events: write
     steps:
       - name: Checkout source code
