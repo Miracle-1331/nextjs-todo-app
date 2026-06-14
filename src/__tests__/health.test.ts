@@ -10,6 +10,8 @@ describe("GET /api/health", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("ok");
+    expect(typeof body.version).toBe("string");
+    expect(body.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(typeof body.uptime).toBe("number");
     expect(typeof body.timestamp).toBe("string");
     expect(body.db).toBe("memory");
