@@ -136,7 +136,8 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Trivy — secrets, vulns, misconfig
+      # Blocking scan — table format, exits 1 on HIGH/CRITICAL findings
+      - name: Trivy — secrets, vulns, misconfig (blocking)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
@@ -144,6 +145,19 @@ jobs:
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
           exit-code: "1"
+          format: table
+          ignore-unfixed: true
+
+      # Report scan — SARIF format for artifact upload, never blocks
+      - name: Trivy — generate SARIF report
+        uses: aquasecurity/trivy-action@v0.36.0
+        if: always()
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "0"
           format: sarif
           output: trivy-fs.sarif
           ignore-unfixed: true
