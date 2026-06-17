@@ -5,28 +5,32 @@ name: Main Release
 # Scans once, signs once, deploys to dev, runs DAST.
 # Does NOT trigger on PRs — only on commits landing on main.
 
+# on:
+#   workflow_dispatch:   # temporarily disabled — re-enable by restoring: push: branches: [main]
+
 on:
-  workflow_dispatch:   # temporarily disabled — re-enable by restoring: push: branches: [main]
+  push:
+    branches: [main]
 
 concurrency:
   group: main-release-${{ github.ref }}
-  cancel-in-progress: false   # never cancel a release in flight
+  cancel-in-progress: false # never cancel a release in flight
 
 env:
   NODE_VERSION: "24"
   IMAGE_NAME: nextjs-todo-app
   AWS_REGION: ap-northeast-1
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}      # e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}  # e.g. nextjs-todo-app
-  GITOPS_REPO: ${{ vars.GITOPS_REPO }}         # e.g. org/gitops-repo
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }} # e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }} # e.g. nextjs-todo-app
+  GITOPS_REPO: ${{ vars.GITOPS_REPO }} # e.g. org/gitops-repo
   APP_NAME: nextjs-todo-app
   VAULT_URL: https://vault.merveilles.org
   VAULT_AUTH_PATH: github-actions
   VAULT_ROLE: gha-agent-ci
 
 permissions:
-  id-token: write   # GitHub OIDC → AWS STS + Vault JWT auth
-  contents: write   # push release metadata to GitOps repo
+  id-token: write # GitHub OIDC → AWS STS + Vault JWT auth
+  contents: write # push release metadata to GitOps repo
   security-events: write
 
 jobs:
