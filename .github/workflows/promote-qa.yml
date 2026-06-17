@@ -205,7 +205,6 @@ jobs:
             CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
             kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
-            kv/data/platform/kubernetes/qa-ci-token token | QA_KUBE_TOKEN ;
 
       - name: Argo CD login
         run: |
@@ -223,12 +222,13 @@ jobs:
           argocd app wait "${{ env.APP_NAME }}-qa" \
             --health --timeout 300
 
-      - name: Wait for Argo Rollouts canary to complete
-        run: |
-          kubectl --server "${{ vars.QA_KUBE_SERVER }}" \
-                  --token  "${{ env.QA_KUBE_TOKEN }}" \
-            argo rollouts status "${{ env.APP_NAME }}" \
-              --namespace qa --timeout 600
+      # TODO: uncomment when Helm chart supports Argo Rollouts
+      # - name: Wait for Argo Rollouts canary to complete
+      #   run: |
+      #     kubectl --server "${{ vars.QA_KUBE_SERVER }}" \
+      #             --token  "${{ env.QA_KUBE_TOKEN }}" \
+      #       argo rollouts status "${{ env.APP_NAME }}" \
+      #         --namespace qa --timeout 600
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 11 · E2E tests (Playwright) against QA

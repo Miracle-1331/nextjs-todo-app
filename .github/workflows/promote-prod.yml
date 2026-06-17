@@ -207,7 +207,6 @@ jobs:
             CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
             kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
-            kv/data/platform/kubernetes/prod-ci-token token | PROD_KUBE_TOKEN ;
 
       - name: Argo CD login
         run: |
@@ -228,12 +227,13 @@ jobs:
       # Argo Rollouts AnalysisTemplate validates SLO metrics during canary steps.
       # The Analysis reads from Prometheus/CloudWatch/Datadog — configure in the
       # AnalysisTemplate manifest in the GitOps repo, not here.
-      - name: Wait for production canary to complete
-        run: |
-          kubectl --server "${{ vars.PROD_KUBE_SERVER }}" \
-                  --token  "${{ env.PROD_KUBE_TOKEN }}" \
-            argo rollouts status "${{ env.APP_NAME }}" \
-              --namespace prod --timeout 1200
+      # TODO: uncomment when Helm chart supports Argo Rollouts
+      # - name: Wait for production canary to complete
+      #   run: |
+      #     kubectl --server "${{ vars.PROD_KUBE_SERVER }}" \
+      #             --token  "${{ env.PROD_KUBE_TOKEN }}" \
+      #       argo rollouts status "${{ env.APP_NAME }}" \
+      #         --namespace prod --timeout 1200
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 11 · Metric analysis (reported by AnalysisTemplate — gate inside rollout)

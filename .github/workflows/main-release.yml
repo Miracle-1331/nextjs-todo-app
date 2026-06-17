@@ -317,7 +317,6 @@ jobs:
             CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
             kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
-            kv/data/platform/kubernetes/dev-ci-token token | DEV_KUBE_TOKEN ;
 
       - name: Argo CD login
         run: |
@@ -335,12 +334,13 @@ jobs:
           argocd app wait "${{ env.APP_NAME }}-dev" \
             --health --timeout 300
 
-      - name: Wait for Argo Rollouts canary to complete
-        run: |
-          kubectl --server "${{ vars.DEV_KUBE_SERVER }}" \
-                  --token  "${{ env.DEV_KUBE_TOKEN }}" \
-            argo rollouts status "${{ env.APP_NAME }}" \
-              --namespace dev --timeout 600
+      # TODO: uncomment when Helm chart supports Argo Rollouts
+      # - name: Wait for Argo Rollouts canary to complete
+      #   run: |
+      #     kubectl --server "${{ vars.DEV_KUBE_SERVER }}" \
+      #             --token  "${{ env.DEV_KUBE_TOKEN }}" \
+      #       argo rollouts status "${{ env.APP_NAME }}" \
+      #         --namespace dev --timeout 600
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 17 · OWASP ZAP baseline DAST against dev endpoint
