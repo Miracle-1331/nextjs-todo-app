@@ -4,9 +4,13 @@ name: PR Validation
 # Triggered on any PR targeting main (feature/*, bugfix/*, hotfix/*).
 # Does NOT build official artifacts or deploy.
 
+# Save GHA runtime
+# on:
+#   pull_request:
+#     branches: [main]
+
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: pr-validation-${{ github.ref }}
@@ -67,7 +71,7 @@ jobs:
     needs: test
     permissions:
       contents: read
-      id-token: write   # required for Vault JWT auth
+      id-token: write # required for Vault JWT auth
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
