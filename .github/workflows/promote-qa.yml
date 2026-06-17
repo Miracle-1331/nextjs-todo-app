@@ -122,8 +122,8 @@ jobs:
         run: |
           DIGEST="${{ inputs.image_digest }}"
           COMMIT=$(yq ".data.commit" "releases/${{ env.APP_NAME }}/${DIGEST//:/-}.yaml")
-          yq -i ".image.digest = \"${DIGEST}\"" "apps/${{ env.APP_NAME }}/values/qa.yaml"
-          yq -i ".image.tag = \"${COMMIT}\"" "apps/${{ env.APP_NAME }}/values/qa.yaml"
+          yq -i ".image.digest = \"${DIGEST}\"" "workloads/todo-app/qa/values.yaml"
+          yq -i ".image.tag = \"${COMMIT}\"" "workloads/todo-app/qa/values.yaml"
 
       - name: Step 8 — Create GitOps PR for QA promotion
         run: |
@@ -132,7 +132,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git checkout -b "$BRANCH"
-          git add "apps/${{ env.APP_NAME }}/values/qa.yaml"
+          git add "workloads/todo-app/qa/values.yaml"
           git commit -m "chore: promote ${{ env.APP_NAME }} to qa @ ${{ inputs.image_digest }}"
           git push --set-upstream origin "$BRANCH"
           gh pr create \
