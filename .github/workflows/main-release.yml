@@ -208,23 +208,21 @@ jobs:
           ")
           echo "$VIOLATIONS"
 
-      # ── Step 11 · Sign image digest with Cosign (keyless OIDC) ───────────────
+      # ── Step 11 · Sign image digest with Cosign (AWS KMS) ────────────────────
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign image digest
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           cosign sign --yes \
+            --key awskms:///alias/extreme-lab-dev-cosign \
             "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
 
-      # ── Step 12 · Attest SBOM with Cosign ────────────────────────────────────
+      # ── Step 12 · Attest SBOM with Cosign (AWS KMS) ──────────────────────────
       - name: Attest SBOM
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           cosign attest --yes \
+            --key awskms:///alias/extreme-lab-dev-cosign \
             --type cyclonedx \
             --predicate sbom.cdx.json \
             "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
