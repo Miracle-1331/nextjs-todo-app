@@ -8,10 +8,9 @@ name: Main Release
 on:
   push:
     branches: [main]
-  workflow_dispatch: # enable manual runs on any branch to test workflow changes before merging
 
 concurrency:
-  group: main-release-${{ github.ref }}
+  group: main-release-nextjs-todo-app
   cancel-in-progress: false # never cancel a release in flight
 
 env:
@@ -19,27 +18,30 @@ env:
   IMAGE_NAME: nextjs-todo-app
   AWS_REGION: ap-southeast-1
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }} # e.g. 123456789012.dkr.ecr.ap-southeast-1.amazonaws.com
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }} # e.g. nextjs-todo-app
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }} # e.g. extreme-lab/todo-app
   GITOPS_REPO: ${{ vars.GITOPS_REPO }} # e.g. org/gitops-repo
   APP_NAME: nextjs-todo-app
   VAULT_URL: https://vault.merveilles.org
   VAULT_AUTH_PATH: github-actions
-  VAULT_ROLE: gha-agent-ci
+  YQ_VERSION: "v4.44.3"
+  ARGOCD_VERSION: "v2.13.3"
 
-permissions:
-  id-token: write # GitHub OIDC → AWS STS + Vault JWT auth
-  contents: write # push release metadata to GitOps repo
-  security-events: write
+permissions: {}
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 1-2 · Checkout + AWS OIDC auth
+  # Steps 1-13 · Build · Scan · SBOM · Sign · GitOps update
   # ─────────────────────────────────────────────────────────────────────────────
   release:
-    name: "Build · Scan · Sign · Deploy Dev"
+    name: "Build · Scan · Sign · GitOps"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
     outputs:
-      image-digest: ${{ steps.resolve-digest.outputs.digest }}
+      image-digest: ${{ steps.build.outputs.digest }}
     steps:
       # ── Step 1 ────────────────────────────────────────────────────────────────
       - name: Checkout source code
@@ -49,7 +51,7 @@ jobs:
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }}
           aws-region: ${{ env.AWS_REGION }}
 
       # ── Step 3 ────────────────────────────────────────────────────────────────
@@ -61,87 +63,45 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image (local, pre-scan)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          load: true
-          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # ── Step 5 · Local image scan — fail on HIGH/CRITICAL before pushing ────
-      - name: Trivy — local image scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          format: sarif
-          output: trivy-image-local.sarif
-          ignore-unfixed: true
-
-      - name: Upload local image scan SARIF
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        continue-on-error: true # requires GitHub Advanced Security — skip gracefully if not enabled
-        with:
-          sarif_file: trivy-image-local.sarif
-          category: trivy-image-main
-
-      # ── Step 6 · Push image ──────────────────────────────────────────────────
-      - name: Push image to ECR
+      # ── Step 5-6 · Build, push, and capture immutable digest in one step ──────
+      - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
 
-      # ── Step 7 · Resolve immutable digest ────────────────────────────────────
-      - name: Resolve image digest from ECR
-        id: resolve-digest
-        run: |
-          DIGEST=$(aws ecr describe-images \
-            --repository-name "${{ env.ECR_REPOSITORY }}" \
-            --image-ids imageTag="${{ github.sha }}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "Image digest: ${DIGEST}"
-
-      # ── Step 8 · Remote scan by digest ───────────────────────────────────────
-      - name: Trivy — remote image scan by digest
+      # ── Step 7 · Scan the pushed image by its immutable digest ───────────────
+      - name: Trivy — image scan by digest (blocking)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           exit-code: "1"
           format: sarif
-          output: trivy-image-remote.sarif
+          output: trivy-image.sarif
           ignore-unfixed: true
 
-      - name: Upload remote image scan SARIF
+      - name: Upload image scan SARIF
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         continue-on-error: true # requires GitHub Advanced Security — skip gracefully if not enabled
         with:
-          sarif_file: trivy-image-remote.sarif
-          category: trivy-image-remote
+          sarif_file: trivy-image.sarif
+          category: trivy-image-main
 
-      # ── Step 9 · Generate SBOM (CycloneDX) ───────────────────────────────────
+      # ── Step 8 · Generate SBOM (CycloneDX) ───────────────────────────────────
       - name: Generate SBOM
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}
           format: cyclonedx
           output: sbom.cdx.json
 
@@ -152,14 +112,14 @@ jobs:
           path: sbom.cdx.json
           retention-days: 90
 
-      # ── Get CI tokens from Vault (covers steps 10, 13, 14) ───────────────────
+      # ── Fetch release secrets from Vault (covers steps 9, 11, 12) ────────────
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@v3
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
           path: ${{ env.VAULT_AUTH_PATH }}
-          role: ${{ env.VAULT_ROLE }}
+          role: gha-release
           jwtGithubAudience: ${{ env.VAULT_URL }}
           extraHeaders: |
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -168,37 +128,43 @@ jobs:
             kv/data/platform/dependency-track/ci-token token | DTRACK_API_KEY ;
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
-      # ── Step 10 · Upload SBOM to DependencyTrack ─────────────────────────────
+      # ── Step 9 · Upload SBOM to DependencyTrack ──────────────────────────────
       - name: Upload SBOM to DependencyTrack
-        env:
-          DTRACK_URL: ${{ vars.DTRACK_URL }}
-        run: |
-          BOM_B64=$(base64 -w 0 sbom.cdx.json)
-          RESPONSE=$(curl -sf --retry 3 \
-            -H "X-Api-Key: ${DTRACK_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"projectName\": \"${{ env.APP_NAME }}\",
-              \"projectVersion\": \"${{ github.sha }}\",
-              \"autoCreate\": true,
-              \"bom\": \"${BOM_B64}\"
-            }" \
-            "${DTRACK_URL}/api/v1/bom")
-          TOKEN=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
-          echo "DependencyTrack BOM token: $TOKEN"
+        id: dtrack-upload
+        uses: DependencyTrack/gh-upload-sbom@v3
+        with:
+          serverhostname: ${{ vars.DTRACK_HOSTNAME }}
+          apikey: ${{ env.DTRACK_API_KEY }}
+          projectname: ${{ env.APP_NAME }}
+          projectversion: ${{ github.sha }}
+          bomfilename: sbom.cdx.json
+          autocreate: true
 
-          # Poll until processing completes
+      - name: Check DependencyTrack policy violations
+        env:
+          DTRACK_URL: https://${{ vars.DTRACK_HOSTNAME }}
+        run: |
+          TOKEN="${{ steps.dtrack-upload.outputs.token }}"
+
+          COMPLETED=false
           for i in $(seq 1 30); do
             PROCESSING=$(curl -sf \
               -H "X-Api-Key: ${DTRACK_API_KEY}" \
               "${DTRACK_URL}/api/v1/bom/token/${TOKEN}" \
               | python3 -c "import json,sys; print(json.load(sys.stdin)['processing'])")
-            if [ "$PROCESSING" = "False" ]; then break; fi
+            if [ "$PROCESSING" = "False" ]; then
+              COMPLETED=true
+              break
+            fi
             sleep 10
           done
 
-          # Check policy violations
-          VIOLATIONS=$(curl -sf \
+          if [ "$COMPLETED" != "true" ]; then
+            echo "Dependency-Track BOM processing timed out"
+            exit 1
+          fi
+
+          curl -sf \
             -H "X-Api-Key: ${DTRACK_API_KEY}" \
             "${DTRACK_URL}/api/v1/violation/project?name=${{ env.APP_NAME }}&version=${{ github.sha }}" \
             | python3 -c "
@@ -209,10 +175,9 @@ jobs:
               print(f'Policy violations: {len(critical)}')
               sys.exit(1)
           print('No critical policy violations.')
-          ")
-          echo "$VIOLATIONS"
+          "
 
-      # ── Step 11 · Sign image digest with Cosign (AWS KMS) ────────────────────
+      # ── Step 10 · Sign image digest with Cosign (AWS KMS) ────────────────────
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
@@ -220,31 +185,31 @@ jobs:
         run: |
           cosign sign --yes \
             --key awskms:///alias/extreme-lab-dev-cosign \
-            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}"
 
-      # ── Step 12 · Attest SBOM with Cosign (AWS KMS) ──────────────────────────
+      # ── Step 11 · Attest SBOM with Cosign (AWS KMS) ──────────────────────────
       - name: Attest SBOM
         run: |
           cosign attest --yes \
             --key awskms:///alias/extreme-lab-dev-cosign \
             --type cyclonedx \
             --predicate sbom.cdx.json \
-            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}"
 
-      # ── Step 13 · Write release metadata to GitOps repo ──────────────────────
+      # ── Step 12 · Write release metadata to GitOps repo ──────────────────────
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
-          path: gitops
+          path: _gitops
 
       - name: Write release metadata
         run: |
-          DIGEST="${{ steps.resolve-digest.outputs.digest }}"
+          DIGEST="${{ steps.build.outputs.digest }}"
           SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          mkdir -p "gitops/releases/${{ env.APP_NAME }}"
+          META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          mkdir -p "_gitops/releases/${{ env.APP_NAME }}"
           cat > "$META_FILE" <<EOF
           apiVersion: v1
           kind: ConfigMap
@@ -265,45 +230,50 @@ jobs:
             prod.deployed: "false"
             prod.validated: "false"
           EOF
-          cd gitops
+          cd _gitops
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add .
           git commit -m "chore: release metadata for ${{ env.APP_NAME }} @ ${{ github.sha }}"
           git push
 
-      # ── Step 14 · Update dev values in GitOps repo ───────────────────────────
+      # ── Step 13 · Update dev values in GitOps repo ───────────────────────────
       - name: Install yq
         run: |
           curl -sSL \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
             -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
 
-      - name: Update values/dev.yaml with new digest
+      - name: Update dev values in GitOps repo
         run: |
-          DIGEST="${{ steps.resolve-digest.outputs.digest }}"
-          cd gitops
-          yq -i ".image.digest = \"${DIGEST}\"" "gitops/workloads/todo-app/dev/values.yaml"
-          yq -i ".image.tag = \"${{ github.sha }}\"" "gitops/workloads/todo-app/dev/values.yaml"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          GITOPS_VALUES_FILE="gitops/workloads/todo-app/dev/values.yaml"
+          cd _gitops
+          test -f "$GITOPS_VALUES_FILE"
+          yq -i ".image.digest = \"${DIGEST}\"" "$GITOPS_VALUES_FILE"
+          yq -i ".image.tag = \"${{ github.sha }}\"" "$GITOPS_VALUES_FILE"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add "gitops/workloads/todo-app/dev/values.yaml"
+          git add "$GITOPS_VALUES_FILE"
           git diff --staged --quiet || git commit -m "chore: promote ${{ env.APP_NAME }} @ ${{ github.sha }} to dev"
           git push
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 15-16 · Argo CD sync dev + canary rollout
+  # Step 14 · Argo CD sync dev
   # ─────────────────────────────────────────────────────────────────────────────
   deploy-dev:
-    name: "15-16 · Deploy Dev + Canary"
+    name: "14 · Deploy Dev"
     runs-on: ubuntu-latest
     needs: release
     environment: dev
+    timeout-minutes: 15
+    permissions:
+      id-token: write
     steps:
       - name: Install Argo CD CLI
         run: |
           curl -sSL \
-            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 \
+            "https://github.com/argoproj/argo-cd/releases/download/${{ env.ARGOCD_VERSION }}/argocd-linux-amd64" \
             -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
 
       - name: Get CI tokens from Vault
@@ -312,7 +282,7 @@ jobs:
           url: ${{ env.VAULT_URL }}
           method: jwt
           path: ${{ env.VAULT_AUTH_PATH }}
-          role: ${{ env.VAULT_ROLE }}
+          role: gha-deploy-dev
           jwtGithubAudience: ${{ env.VAULT_URL }}
           extraHeaders: |
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -320,40 +290,90 @@ jobs:
           secrets: |
             kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
 
-      - name: Argo CD login
-        run: |
-          argocd login "${{ vars.ARGOCD_SERVER }}" \
-            --auth-token "${{ env.ARGOCD_TOKEN }}" \
-            --grpc-web
-
       - name: Sync dev application
         run: |
-          argocd app sync "todo-app-dev" \
-            --force --prune --timeout 300
+          argocd app sync todo-app-dev \
+            --server "${{ vars.ARGOCD_SERVER }}" \
+            --auth-token "${{ env.ARGOCD_TOKEN }}" \
+            --grpc-web \
+            --prune --timeout 300
 
       - name: Wait for dev rollout healthy
         run: |
-          argocd app wait "todo-app-dev" \
-            --health --timeout 300
-
-      # TODO: uncomment when Helm chart supports Argo Rollouts
-      # - name: Wait for Argo Rollouts canary to complete
-      #   run: |
-      #     kubectl --server "${{ vars.DEV_KUBE_SERVER }}" \
-      #             --token  "${{ env.DEV_KUBE_TOKEN }}" \
-      #       argo rollouts status "${{ env.APP_NAME }}" \
-      #         --namespace dev --timeout 600
+          argocd app wait todo-app-dev \
+            --server "${{ vars.ARGOCD_SERVER }}" \
+            --auth-token "${{ env.ARGOCD_TOKEN }}" \
+            --grpc-web \
+            --sync --health --operation --timeout 600
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 17 · OWASP ZAP baseline DAST against dev endpoint
+  # Step 15 · Mark dev deployed (Argo CD health confirmed — before DAST)
+  # ─────────────────────────────────────────────────────────────────────────────
+  mark-dev-deployed:
+    name: "15 · Mark Dev Deployed"
+    runs-on: ubuntu-latest
+    needs: [release, deploy-dev]
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: gha-mark-dev
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ env.GITOPS_TOKEN }}
+          path: _gitops
+
+      - name: Install yq
+        run: |
+          curl -sSL \
+            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
+            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+      - name: Set dev.deployed=true
+        run: |
+          DIGEST="${{ needs.release.outputs.image-digest }}"
+          SAFE_DIGEST="${DIGEST//:/-}"
+          META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          test -f "$META_FILE"
+          yq -i '.data["dev.deployed"] = "true"' "$META_FILE"
+          cd _gitops
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          git commit -m "chore: mark dev.deployed=true for ${{ env.APP_NAME }} @ ${{ github.sha }}"
+          git push
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 16 · OWASP ZAP baseline DAST against dev endpoint
   # ─────────────────────────────────────────────────────────────────────────────
   dast-dev:
-    name: "17 · DAST (ZAP baseline) — Dev"
+    name: "16 · DAST (ZAP baseline) — Dev"
     runs-on: ubuntu-latest
     needs: deploy-dev
+    environment: dev
+    timeout-minutes: 20
     permissions:
+      contents: read
       security-events: write
     steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
       - name: ZAP baseline scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
@@ -371,12 +391,15 @@ jobs:
           retention-days: 14
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 18 · Mark dev validated in release metadata
+  # Step 17 · Mark dev validated (DAST passed)
   # ─────────────────────────────────────────────────────────────────────────────
   mark-dev-validated:
-    name: "18 · Mark Dev Validated"
+    name: "17 · Mark Dev Validated"
     runs-on: ubuntu-latest
     needs: [release, dast-dev]
+    timeout-minutes: 5
+    permissions:
+      id-token: write
     steps:
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@v3
@@ -384,7 +407,7 @@ jobs:
           url: ${{ env.VAULT_URL }}
           method: jwt
           path: ${{ env.VAULT_AUTH_PATH }}
-          role: ${{ env.VAULT_ROLE }}
+          role: gha-mark-dev
           jwtGithubAudience: ${{ env.VAULT_URL }}
           extraHeaders: |
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -397,22 +420,22 @@ jobs:
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
-          path: gitops
+          path: _gitops
 
       - name: Install yq
         run: |
           curl -sSL \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
             -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
 
-      - name: Set dev.deployed=true and dev.validated=true
+      - name: Set dev.validated=true
         run: |
           DIGEST="${{ needs.release.outputs.image-digest }}"
           SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          yq -i '.data["dev.deployed"] = "true"' "$META_FILE"
+          META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
+          test -f "$META_FILE"
           yq -i '.data["dev.validated"] = "true"' "$META_FILE"
-          cd gitops
+          cd _gitops
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add "releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
