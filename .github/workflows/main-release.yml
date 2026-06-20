@@ -17,8 +17,8 @@ concurrency:
 env:
   NODE_VERSION: "24"
   IMAGE_NAME: nextjs-todo-app
-  AWS_REGION: ap-northeast-1
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }} # e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com
+  AWS_REGION: ap-southeast-1
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }} # e.g. 123456789012.dkr.ecr.ap-southeast-1.amazonaws.com
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }} # e.g. nextjs-todo-app
   GITOPS_REPO: ${{ vars.GITOPS_REPO }} # e.g. org/gitops-repo
   APP_NAME: nextjs-todo-app
