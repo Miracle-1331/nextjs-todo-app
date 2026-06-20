@@ -41,7 +41,7 @@ jobs:
       id-token: write
       security-events: write
     outputs:
-      image-digest: ${{ steps.build.outputs.digest }}
+      image-digest: ${{ steps.resolve-digest.outputs.digest }}
     steps:
       # ── Step 1 ────────────────────────────────────────────────────────────────
       - name: Checkout source code
@@ -63,9 +63,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ── Step 5-6 · Build, push, and capture immutable digest in one step ──────
+      # ── Step 5 · Check if tag already exists (immutable tags block re-push) ────
+      - name: Check if image tag already exists in ECR
+        id: check-image
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ github.sha }}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || echo "")
+          if [ -n "$DIGEST" ] && [ "$DIGEST" != "None" ]; then
+            echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+            echo "Image tag already exists in ECR: ${DIGEST} — skipping build"
+          else
+            echo "Image tag not found — will build and push"
+          fi
+
+      # ── Step 6 · Build and push (skipped if tag already exists) ──────────────
       - name: Build and push image
         id: build
+        if: steps.check-image.outputs.digest == ''
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -75,12 +92,19 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
 
+      - name: Resolve image digest
+        id: resolve-digest
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}${{ steps.check-image.outputs.digest }}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Resolved digest: ${DIGEST}"
+
       # ── Step 7 · Scan the pushed image by its immutable digest ───────────────
       - name: Trivy — image scan by digest (blocking)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           exit-code: "1"
@@ -101,7 +125,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}
           format: cyclonedx
           output: sbom.cdx.json
 
@@ -185,7 +209,7 @@ jobs:
         run: |
           cosign sign --yes \
             --key awskms:///alias/extreme-lab-dev-cosign \
-            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}"
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
 
       # ── Step 11 · Attest SBOM with Cosign (AWS KMS) ──────────────────────────
       - name: Attest SBOM
@@ -194,7 +218,7 @@ jobs:
             --key awskms:///alias/extreme-lab-dev-cosign \
             --type cyclonedx \
             --predicate sbom.cdx.json \
-            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}"
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
 
       # ── Step 12 · Write release metadata to GitOps repo ──────────────────────
       - name: Checkout GitOps repo
@@ -206,7 +230,7 @@ jobs:
 
       - name: Write release metadata
         run: |
-          DIGEST="${{ steps.build.outputs.digest }}"
+          DIGEST="${{ steps.resolve-digest.outputs.digest }}"
           SAFE_DIGEST="${DIGEST//:/-}"
           META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
           mkdir -p "_gitops/releases/${{ env.APP_NAME }}"
@@ -246,7 +270,7 @@ jobs:
 
       - name: Update dev values in GitOps repo
         run: |
-          DIGEST="${{ steps.build.outputs.digest }}"
+          DIGEST="${{ steps.resolve-digest.outputs.digest }}"
           GITOPS_VALUES_FILE="gitops/workloads/todo-app/dev/values.yaml"
           cd _gitops
           test -f "$GITOPS_VALUES_FILE"
