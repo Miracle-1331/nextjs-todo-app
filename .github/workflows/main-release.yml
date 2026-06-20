@@ -157,16 +157,12 @@ jobs:
         env:
           DTRACK_URL: https://${{ vars.DTRACK_HOSTNAME }}
         run: |
-          BOM_B64=$(base64 -w 0 sbom.cdx.json)
           RESPONSE=$(curl -sf --retry 3 \
             -H "X-Api-Key: ${DTRACK_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"projectName\": \"${{ env.APP_NAME }}\",
-              \"projectVersion\": \"${{ github.sha }}\",
-              \"autoCreate\": true,
-              \"bom\": \"${BOM_B64}\"
-            }" \
+            -F "projectName=${{ env.APP_NAME }}" \
+            -F "projectVersion=${{ github.sha }}" \
+            -F "autoCreate=true" \
+            -F "bom=@sbom.cdx.json" \
             "${DTRACK_URL}/api/v1/bom")
           TOKEN=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
           echo "DependencyTrack BOM token: ${TOKEN}"
