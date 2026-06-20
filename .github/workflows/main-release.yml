@@ -153,12 +153,16 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       # ── Step 9 · Upload SBOM to DependencyTrack ──────────────────────────────
+      - name: Export DT API key as step output
+        id: dt-creds
+        run: echo "apikey=${DTRACK_API_KEY}" >> "$GITHUB_OUTPUT"
+
       - name: Upload SBOM to DependencyTrack
         id: dtrack-upload
         uses: DependencyTrack/gh-upload-sbom@v4
         with:
           serverhostname: ${{ vars.DTRACK_HOSTNAME }}
-          apikey: ${{ env.DTRACK_API_KEY }}
+          apikey: ${{ steps.dt-creds.outputs.apikey }}
           projectname: ${{ env.APP_NAME }}
           projectversion: ${{ github.sha }}
           bomfilename: sbom.cdx.json
