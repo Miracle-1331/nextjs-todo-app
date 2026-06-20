@@ -149,20 +149,15 @@ jobs:
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
             CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
-            kv/data/platform/dependency-track/ci-token token | DTRACK_API_KEY ;
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       # ── Step 9 · Upload SBOM to DependencyTrack ──────────────────────────────
-      - name: Export DT API key as step output
-        id: dt-creds
-        run: echo "apikey=${DTRACK_API_KEY}" >> "$GITHUB_OUTPUT"
-
       - name: Upload SBOM to DependencyTrack
         id: dtrack-upload
         uses: DependencyTrack/gh-upload-sbom@v4
         with:
           serverhostname: ${{ vars.DTRACK_HOSTNAME }}
-          apikey: ${{ steps.dt-creds.outputs.apikey }}
+          apikey: ${{ secrets.DTRACK_API_KEY }}
           projectname: ${{ env.APP_NAME }}
           projectversion: ${{ github.sha }}
           bomfilename: sbom.cdx.json
@@ -171,6 +166,7 @@ jobs:
       - name: Check DependencyTrack policy violations
         env:
           DTRACK_URL: https://${{ vars.DTRACK_HOSTNAME }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
         run: |
           TOKEN="${{ steps.dtrack-upload.outputs.token }}"
 
