@@ -40,7 +40,9 @@ COPY --from=builder --chown=node:node /app/public ./public
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 
-RUN mkdir -p .next public && chown -R node:node .next public
+RUN mkdir -p .next public && chown -R node:node .next public \
+    # npm/corepack not needed at runtime — remove to eliminate bundled CVEs (e.g. undici)
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 USER node
 
