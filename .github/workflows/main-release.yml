@@ -5,12 +5,10 @@ name: Main Release
 # Scans once, signs once, deploys to dev, runs DAST.
 # Does NOT trigger on PRs — only on commits landing on main.
 
-# on:
-#   workflow_dispatch:   # temporarily disabled — re-enable by restoring: push: branches: [main]
-
 on:
   push:
     branches: [main]
+  workflow_dispatch: # enable manual runs on any branch to test workflow changes before merging
 
 concurrency:
   group: main-release-${{ github.ref }}

@@ -29,6 +29,24 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
+  # Step 0 — Lint all workflow files (actionlint)
+  # Catches invalid action refs, bad expressions, type errors before anything runs.
+  # ─────────────────────────────────────────────────────────────────────────────
+  actionlint:
+    name: "0 · Lint Workflows"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@v1
+        with:
+          fail_on_error: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Step 1-5 — Checkout · Runtime · Install · Unit tests + coverage · Lint
   # ─────────────────────────────────────────────────────────────────────────────
   test:
@@ -208,7 +226,7 @@ jobs:
   pr-validated:
     name: PR Validated
     runs-on: ubuntu-latest
-    needs: [test, sonar, trivy-fs, docker-build-check]
+    needs: [actionlint, test, sonar, trivy-fs, docker-build-check]
     if: always()
     steps:
       - name: Verify all required jobs passed
