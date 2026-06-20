@@ -131,7 +131,7 @@ jobs:
       # ── Step 9 · Upload SBOM to DependencyTrack ──────────────────────────────
       - name: Upload SBOM to DependencyTrack
         id: dtrack-upload
-        uses: DependencyTrack/gh-upload-sbom@v3
+        uses: DependencyTrack/gh-upload-sbom@v4
         with:
           serverhostname: ${{ vars.DTRACK_HOSTNAME }}
           apikey: ${{ env.DTRACK_API_KEY }}
