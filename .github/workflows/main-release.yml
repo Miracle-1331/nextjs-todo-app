@@ -179,12 +179,19 @@ jobs:
 
           COMPLETED=false
           for i in $(seq 1 30); do
-            PROCESSING=$(curl -sf \
+            POLL_BODY=$(curl -s \
               -H "X-Api-Key: ${DTRACK_API_KEY}" \
               -H "CF-Access-Client-Id: ${CF_CLIENT_ID}" \
               -H "CF-Access-Client-Secret: ${CF_CLIENT_SECRET}" \
-              "${DTRACK_URL}/api/v1/bom/token/${TOKEN}" \
-              | python3 -c "import json,sys; print(json.load(sys.stdin)['processing'])")
+              "${DTRACK_URL}/api/v1/bom/token/${TOKEN}")
+            echo "Poll ${i}: ${POLL_BODY}"
+            PROCESSING=$(echo "$POLL_BODY" | python3 -c "
+import json,sys
+try:
+    print(json.load(sys.stdin).get('processing', 'True'))
+except Exception:
+    print('True')
+" 2>/dev/null || echo "True")
             if [ "$PROCESSING" = "False" ]; then
               COMPLETED=true
               break
