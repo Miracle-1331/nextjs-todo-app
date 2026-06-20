@@ -114,12 +114,12 @@ jobs:
 
       # ── Fetch release secrets from Vault (covers steps 9, 11, 12) ────────────
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
           path: ${{ env.VAULT_AUTH_PATH }}
-          role: gha-release
+          role: gha-agent-ci
           jwtGithubAudience: ${{ env.VAULT_URL }}
           extraHeaders: |
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -277,12 +277,12 @@ jobs:
             -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
 
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
           path: ${{ env.VAULT_AUTH_PATH }}
-          role: gha-deploy-dev
+          role: gha-agent-ci
           jwtGithubAudience: ${{ env.VAULT_URL }}
           extraHeaders: |
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -318,12 +318,12 @@ jobs:
       id-token: write
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
           path: ${{ env.VAULT_AUTH_PATH }}
-          role: gha-mark-dev
+          role: gha-agent-ci
           jwtGithubAudience: ${{ env.VAULT_URL }}
           extraHeaders: |
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -402,12 +402,12 @@ jobs:
       id-token: write
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
           path: ${{ env.VAULT_AUTH_PATH }}
-          role: gha-mark-dev
+          role: gha-agent-ci
           jwtGithubAudience: ${{ env.VAULT_URL }}
           extraHeaders: |
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}

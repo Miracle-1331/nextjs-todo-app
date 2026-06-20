@@ -54,7 +54,7 @@ jobs:
     needs: validate-inputs
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -124,7 +124,7 @@ jobs:
     needs: validate-gates
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -193,7 +193,7 @@ jobs:
             -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
 
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -326,7 +326,7 @@ jobs:
     needs: [e2e-qa, smoke-qa, dast-qa]
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt

@@ -118,7 +118,7 @@ jobs:
           java-version: "21"
 
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
