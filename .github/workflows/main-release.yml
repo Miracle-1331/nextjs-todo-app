@@ -197,12 +197,15 @@ jobs:
             exit 1
           fi
 
-          curl -sf \
+          VIOLATIONS=$(curl -sf \
             -H "X-Api-Key: ${DTRACK_API_KEY}" \
             -H "CF-Access-Client-Id: ${CF_CLIENT_ID}" \
             -H "CF-Access-Client-Secret: ${CF_CLIENT_SECRET}" \
-            "${DTRACK_URL}/api/v1/violation/project?name=${{ env.APP_NAME }}&version=${{ github.sha }}" \
-            | python3 -c "
+            "${DTRACK_URL}/api/v1/violation/project?name=${{ env.APP_NAME }}&version=${{ github.sha }}")
+          if [ -z "$VIOLATIONS" ] || [ "$VIOLATIONS" = "[]" ]; then
+            echo "No policy violations."
+          else
+            echo "$VIOLATIONS" | python3 -c "
           import json, sys
           data = json.load(sys.stdin)
           critical = [v for v in data if v.get('type') == 'SECURITY']
@@ -211,6 +214,7 @@ jobs:
               sys.exit(1)
           print('No critical policy violations.')
           "
+          fi
 
       # ── Step 10 · Sign image digest with Cosign (AWS KMS) ────────────────────
       - name: Install Cosign
