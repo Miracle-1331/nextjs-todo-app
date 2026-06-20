@@ -75,7 +75,7 @@ jobs:
 
       # ── Step 5 · Local image scan — fail on HIGH/CRITICAL before pushing ────
       - name: Trivy — local image scan
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
@@ -118,7 +118,7 @@ jobs:
 
       # ── Step 8 · Remote scan by digest ───────────────────────────────────────
       - name: Trivy — remote image scan by digest
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}
@@ -138,7 +138,7 @@ jobs:
 
       # ── Step 9 · Generate SBOM (CycloneDX) ───────────────────────────────────
       - name: Generate SBOM
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}
@@ -244,7 +244,7 @@ jobs:
           DIGEST="${{ steps.resolve-digest.outputs.digest }}"
           SAFE_DIGEST="${DIGEST//:/-}"
           META_FILE="gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          mkdir -p "$(dirname "$META_FILE")"
+          mkdir -p "gitops/releases/${{ env.APP_NAME }}"
           cat > "$META_FILE" <<EOF
           apiVersion: v1
           kind: ConfigMap
@@ -283,12 +283,12 @@ jobs:
         run: |
           DIGEST="${{ steps.resolve-digest.outputs.digest }}"
           cd gitops
-          yq -i ".image.digest = \"${DIGEST}\"" "workloads/todo-app/dev/values.yaml"
-          yq -i ".image.tag = \"${{ github.sha }}\"" "workloads/todo-app/dev/values.yaml"
+          yq -i ".image.digest = \"${DIGEST}\"" "gitops/workloads/todo-app/dev/values.yaml"
+          yq -i ".image.tag = \"${{ github.sha }}\"" "gitops/workloads/todo-app/dev/values.yaml"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add "workloads/todo-app/dev/values.yaml"
-          git diff --staged --quiet || git commit -m "chore: promote ${{ env.APP_NAME }} ${{ github.sha }} to dev"
+          git add "gitops/workloads/todo-app/dev/values.yaml"
+          git diff --staged --quiet || git commit -m "chore: promote ${{ env.APP_NAME }} @ ${{ github.sha }} to dev"
           git push
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -328,12 +328,12 @@ jobs:
 
       - name: Sync dev application
         run: |
-          argocd app sync "${{ env.APP_NAME }}-dev" \
+          argocd app sync "todo-app-dev" \
             --force --prune --timeout 300
 
       - name: Wait for dev rollout healthy
         run: |
-          argocd app wait "${{ env.APP_NAME }}-dev" \
+          argocd app wait "todo-app-dev" \
             --health --timeout 300
 
       # TODO: uncomment when Helm chart supports Argo Rollouts
