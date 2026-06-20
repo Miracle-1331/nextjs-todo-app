@@ -19,6 +19,9 @@ env:
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   AWS_REGION: ap-northeast-1
+  VAULT_URL: https://vault.merveilles.org
+  VAULT_AUTH_PATH: github-actions
+  VAULT_ROLE: gha-agent-ci
 
 permissions:
   id-token: write
@@ -50,11 +53,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate-inputs
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
 
       - name: Install yq
         run: |
@@ -106,11 +123,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate-gates
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
 
       - name: Install yq
         run: |
@@ -122,8 +153,8 @@ jobs:
         run: |
           DIGEST="${{ inputs.image_digest }}"
           COMMIT=$(yq ".data.commit" "releases/${{ env.APP_NAME }}/${DIGEST//:/-}.yaml")
-          yq -i ".image.digest = \"${DIGEST}\"" "apps/${{ env.APP_NAME }}/values/qa.yaml"
-          yq -i ".image.tag = \"${COMMIT}\"" "apps/${{ env.APP_NAME }}/values/qa.yaml"
+          yq -i ".image.digest = \"${DIGEST}\"" "workloads/todo-app/qa/values.yaml"
+          yq -i ".image.tag = \"${COMMIT}\"" "workloads/todo-app/qa/values.yaml"
 
       - name: Step 8 — Create GitOps PR for QA promotion
         run: |
@@ -132,7 +163,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git checkout -b "$BRANCH"
-          git add "apps/${{ env.APP_NAME }}/values/qa.yaml"
+          git add "workloads/todo-app/qa/values.yaml"
           git commit -m "chore: promote ${{ env.APP_NAME }} to qa @ ${{ inputs.image_digest }}"
           git push --set-upstream origin "$BRANCH"
           gh pr create \
@@ -144,7 +175,7 @@ jobs:
             --base main \
             --head "$BRANCH"
         env:
-          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          GH_TOKEN: ${{ env.GITOPS_TOKEN }}
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 9-10 · Argo CD sync QA + canary rollout
@@ -164,11 +195,14 @@ jobs:
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@v3
         with:
-          url: https://vault.merveilles.org
+          url: ${{ env.VAULT_URL }}
           method: jwt
-          path: github-actions
-          role: gha-agent-ci
-          jwtGithubAudience: https://vault.merveilles.org
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
             kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
 
@@ -188,12 +222,13 @@ jobs:
           argocd app wait "${{ env.APP_NAME }}-qa" \
             --health --timeout 300
 
-      - name: Wait for Argo Rollouts canary to complete
-        run: |
-          kubectl --server "${{ vars.QA_KUBE_SERVER }}" \
-                  --token  "${{ secrets.QA_KUBE_TOKEN }}" \
-            argo rollouts status "${{ env.APP_NAME }}" \
-              --namespace qa --timeout 600
+      # TODO: uncomment when Helm chart supports Argo Rollouts
+      # - name: Wait for Argo Rollouts canary to complete
+      #   run: |
+      #     kubectl --server "${{ vars.QA_KUBE_SERVER }}" \
+      #             --token  "${{ env.QA_KUBE_TOKEN }}" \
+      #       argo rollouts status "${{ env.APP_NAME }}" \
+      #         --namespace qa --timeout 600
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 11 · E2E tests (Playwright) against QA
@@ -290,11 +325,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: [e2e-qa, smoke-qa, dast-qa]
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
 
       - name: Install yq
         run: |

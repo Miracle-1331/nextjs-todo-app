@@ -1,0 +1,4 @@
+# docker-compose.yml and docker-compose.test.yml contain hardcoded credentials
+# (todos_pass / todos_user) that are intentional dev/test fixtures, not real secrets.
+# These files are not deployed to production.
+DS016

@@ -5,25 +5,32 @@ name: Main Release
 # Scans once, signs once, deploys to dev, runs DAST.
 # Does NOT trigger on PRs — only on commits landing on main.
 
+# on:
+#   workflow_dispatch:   # temporarily disabled — re-enable by restoring: push: branches: [main]
+
 on:
-  workflow_dispatch:   # temporarily disabled — re-enable by restoring: push: branches: [main]
+  push:
+    branches: [main]
 
 concurrency:
   group: main-release-${{ github.ref }}
-  cancel-in-progress: false   # never cancel a release in flight
+  cancel-in-progress: false # never cancel a release in flight
 
 env:
   NODE_VERSION: "24"
   IMAGE_NAME: nextjs-todo-app
   AWS_REGION: ap-northeast-1
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}      # e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}  # e.g. nextjs-todo-app
-  GITOPS_REPO: ${{ vars.GITOPS_REPO }}         # e.g. org/gitops-repo
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }} # e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }} # e.g. nextjs-todo-app
+  GITOPS_REPO: ${{ vars.GITOPS_REPO }} # e.g. org/gitops-repo
   APP_NAME: nextjs-todo-app
+  VAULT_URL: https://vault.merveilles.org
+  VAULT_AUTH_PATH: github-actions
+  VAULT_ROLE: gha-agent-ci
 
 permissions:
-  id-token: write   # GitHub OIDC → AWS STS
-  contents: write   # push release metadata to GitOps repo
+  id-token: write # GitHub OIDC → AWS STS + Vault JWT auth
+  contents: write # push release metadata to GitOps repo
   security-events: write
 
 jobs:
@@ -145,11 +152,26 @@ jobs:
           path: sbom.cdx.json
           retention-days: 90
 
+      # ── Get CI tokens from Vault (covers steps 10, 13, 14) ───────────────────
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/dependency-track/ci-token token | DTRACK_API_KEY ;
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       # ── Step 10 · Upload SBOM to DependencyTrack ─────────────────────────────
       - name: Upload SBOM to DependencyTrack
         env:
           DTRACK_URL: ${{ vars.DTRACK_URL }}
-          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
         run: |
           BOM_B64=$(base64 -w 0 sbom.cdx.json)
           RESPONSE=$(curl -sf --retry 3 \
@@ -190,23 +212,21 @@ jobs:
           ")
           echo "$VIOLATIONS"
 
-      # ── Step 11 · Sign image digest with Cosign (keyless OIDC) ───────────────
+      # ── Step 11 · Sign image digest with Cosign (AWS KMS) ────────────────────
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign image digest
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           cosign sign --yes \
+            --key awskms:///alias/extreme-lab-dev-cosign \
             "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
 
-      # ── Step 12 · Attest SBOM with Cosign ────────────────────────────────────
+      # ── Step 12 · Attest SBOM with Cosign (AWS KMS) ──────────────────────────
       - name: Attest SBOM
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           cosign attest --yes \
+            --key awskms:///alias/extreme-lab-dev-cosign \
             --type cyclonedx \
             --predicate sbom.cdx.json \
             "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ steps.resolve-digest.outputs.digest }}"
@@ -216,7 +236,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
           path: gitops
 
       - name: Write release metadata
@@ -263,11 +283,11 @@ jobs:
         run: |
           DIGEST="${{ steps.resolve-digest.outputs.digest }}"
           cd gitops
-          yq -i ".image.digest = \"${DIGEST}\"" "apps/${{ env.APP_NAME }}/values/dev.yaml"
-          yq -i ".image.tag = \"${{ github.sha }}\"" "apps/${{ env.APP_NAME }}/values/dev.yaml"
+          yq -i ".image.digest = \"${DIGEST}\"" "workloads/todo-app/dev/values.yaml"
+          yq -i ".image.tag = \"${{ github.sha }}\"" "workloads/todo-app/dev/values.yaml"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add "apps/${{ env.APP_NAME }}/values/dev.yaml"
+          git add "workloads/todo-app/dev/values.yaml"
           git diff --staged --quiet || git commit -m "chore: promote ${{ env.APP_NAME }} ${{ github.sha }} to dev"
           git push
 
@@ -286,10 +306,24 @@ jobs:
             https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 \
             -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
 
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
+
       - name: Argo CD login
         run: |
           argocd login "${{ vars.ARGOCD_SERVER }}" \
-            --auth-token "${{ secrets.ARGOCD_TOKEN }}" \
+            --auth-token "${{ env.ARGOCD_TOKEN }}" \
             --grpc-web
 
       - name: Sync dev application
@@ -302,12 +336,13 @@ jobs:
           argocd app wait "${{ env.APP_NAME }}-dev" \
             --health --timeout 300
 
-      - name: Wait for Argo Rollouts canary to complete
-        run: |
-          kubectl --server "${{ vars.DEV_KUBE_SERVER }}" \
-                  --token  "${{ secrets.DEV_KUBE_TOKEN }}" \
-            argo rollouts status "${{ env.APP_NAME }}" \
-              --namespace dev --timeout 600
+      # TODO: uncomment when Helm chart supports Argo Rollouts
+      # - name: Wait for Argo Rollouts canary to complete
+      #   run: |
+      #     kubectl --server "${{ vars.DEV_KUBE_SERVER }}" \
+      #             --token  "${{ env.DEV_KUBE_TOKEN }}" \
+      #       argo rollouts status "${{ env.APP_NAME }}" \
+      #         --namespace dev --timeout 600
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 17 · OWASP ZAP baseline DAST against dev endpoint
@@ -343,11 +378,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: [release, dast-dev]
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
           path: gitops
 
       - name: Install yq

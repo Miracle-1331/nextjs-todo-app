@@ -18,6 +18,9 @@ env:
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   AWS_REGION: ap-northeast-1
+  VAULT_URL: https://vault.merveilles.org
+  VAULT_AUTH_PATH: github-actions
+  VAULT_ROLE: gha-agent-ci
 
 permissions:
   id-token: write
@@ -49,11 +52,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: require-approval
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
 
       - name: Install yq
         run: |
@@ -105,11 +122,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate-gates
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
 
       - name: Install yq
         run: |
@@ -121,8 +152,8 @@ jobs:
         run: |
           DIGEST="${{ inputs.image_digest }}"
           COMMIT=$(yq ".data.commit" "releases/${{ env.APP_NAME }}/${DIGEST//:/-}.yaml")
-          yq -i ".image.digest = \"${DIGEST}\"" "apps/${{ env.APP_NAME }}/values/prod.yaml"
-          yq -i ".image.tag = \"${COMMIT}\"" "apps/${{ env.APP_NAME }}/values/prod.yaml"
+          yq -i ".image.digest = \"${DIGEST}\"" "workloads/todo-app/prod/values.yaml"
+          yq -i ".image.tag = \"${COMMIT}\"" "workloads/todo-app/prod/values.yaml"
 
       - name: Step 8 — Create production GitOps PR
         run: |
@@ -131,7 +162,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git checkout -b "$BRANCH"
-          git add "apps/${{ env.APP_NAME }}/values/prod.yaml"
+          git add "workloads/todo-app/prod/values.yaml"
           git commit -m "chore: promote ${{ env.APP_NAME }} to prod @ ${{ inputs.image_digest }}"
           git push --set-upstream origin "$BRANCH"
           gh pr create \
@@ -146,7 +177,7 @@ jobs:
             --base main \
             --head "$BRANCH"
         env:
-          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          GH_TOKEN: ${{ env.GITOPS_TOKEN }}
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 9-10 · Argo CD sync prod + production canary rollout
@@ -163,10 +194,24 @@ jobs:
             https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 \
             -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
 
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
+
       - name: Argo CD login
         run: |
           argocd login "${{ vars.ARGOCD_SERVER }}" \
-            --auth-token "${{ secrets.ARGOCD_TOKEN }}" \
+            --auth-token "${{ env.ARGOCD_TOKEN }}" \
             --grpc-web
 
       - name: Sync production application
@@ -182,12 +227,13 @@ jobs:
       # Argo Rollouts AnalysisTemplate validates SLO metrics during canary steps.
       # The Analysis reads from Prometheus/CloudWatch/Datadog — configure in the
       # AnalysisTemplate manifest in the GitOps repo, not here.
-      - name: Wait for production canary to complete
-        run: |
-          kubectl --server "${{ vars.PROD_KUBE_SERVER }}" \
-                  --token  "${{ secrets.PROD_KUBE_TOKEN }}" \
-            argo rollouts status "${{ env.APP_NAME }}" \
-              --namespace prod --timeout 1200
+      # TODO: uncomment when Helm chart supports Argo Rollouts
+      # - name: Wait for production canary to complete
+      #   run: |
+      #     kubectl --server "${{ vars.PROD_KUBE_SERVER }}" \
+      #             --token  "${{ env.PROD_KUBE_TOKEN }}" \
+      #       argo rollouts status "${{ env.APP_NAME }}" \
+      #         --namespace prod --timeout 1200
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 11 · Metric analysis (reported by AnalysisTemplate — gate inside rollout)
@@ -222,6 +268,20 @@ jobs:
     needs: smoke-prod
     if: always()
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/slack/webhook-url url | SLACK_WEBHOOK_URL ;
+
       - name: Build notification payload
         id: payload
         run: |
@@ -239,7 +299,7 @@ jobs:
       - name: Send Slack notification
         uses: slackapi/slack-github-action@v2.0.0
         with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook: ${{ env.SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
           payload: |
             {
@@ -262,11 +322,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: smoke-prod
     steps:
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: ${{ env.VAULT_ROLE }}
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
+
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
+          token: ${{ env.GITOPS_TOKEN }}
 
       - name: Install yq
         run: |
