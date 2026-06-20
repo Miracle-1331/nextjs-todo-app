@@ -149,26 +149,27 @@ jobs:
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
             CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
+            kv/data/platform/dependency-track/ci-token token | DTRACK_API_KEY ;
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       # ── Step 9 · Upload SBOM to DependencyTrack ──────────────────────────────
-      - name: Upload SBOM to DependencyTrack
-        id: dtrack-upload
-        uses: DependencyTrack/gh-upload-sbom@v4
-        with:
-          serverhostname: ${{ vars.DTRACK_HOSTNAME }}
-          apikey: ${{ secrets.DTRACK_API_KEY }}
-          projectname: ${{ env.APP_NAME }}
-          projectversion: ${{ github.sha }}
-          bomfilename: sbom.cdx.json
-          autocreate: true
-
-      - name: Check DependencyTrack policy violations
+      - name: Upload SBOM to DependencyTrack and check policy violations
         env:
           DTRACK_URL: https://${{ vars.DTRACK_HOSTNAME }}
-          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
         run: |
-          TOKEN="${{ steps.dtrack-upload.outputs.token }}"
+          BOM_B64=$(base64 -w 0 sbom.cdx.json)
+          RESPONSE=$(curl -sf --retry 3 \
+            -H "X-Api-Key: ${DTRACK_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"projectName\": \"${{ env.APP_NAME }}\",
+              \"projectVersion\": \"${{ github.sha }}\",
+              \"autoCreate\": true,
+              \"bom\": \"${BOM_B64}\"
+            }" \
+            "${DTRACK_URL}/api/v1/bom")
+          TOKEN=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
+          echo "DependencyTrack BOM token: ${TOKEN}"
 
           COMPLETED=false
           for i in $(seq 1 30); do
