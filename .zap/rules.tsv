@@ -1,3 +1,5 @@
 # ZAP baseline scan rule overrides.
 # Format: rule-id  IGNORE|WARN|FAIL  description
-# Leave empty to use ZAP defaults — all baseline rules warn/fail as defined by ZAP.
+10049	IGNORE	Non-Storable Content — expected for API routes and dynamic pages
+10050	IGNORE	Retrieved from Cache — expected for static assets served via CDN/Cloudflare
+10109	IGNORE	Modern Web Application — informational only, not a vulnerability
