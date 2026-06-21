@@ -76,6 +76,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
+      contents: read
       id-token: write
     strategy:
       matrix:
