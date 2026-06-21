@@ -3,3 +3,9 @@
 10049	IGNORE	Non-Storable Content — expected for API routes and dynamic pages
 10050	IGNORE	Retrieved from Cache — expected for static assets served via CDN/Cloudflare
 10109	IGNORE	Modern Web Application — informational only, not a vulnerability
+10015	IGNORE	Re-examine Cache-control Directives — s-maxage on pages is set by Cloudflare; no-store on API routes is intentional
+10035	IGNORE	HSTS — static assets (/_next/static) served by Cloudflare which handles HSTS at edge; Next.js headers() does not apply to static file serving
+10021	IGNORE	X-Content-Type-Options — Next.js headers() does not inject headers on /_next/static/* file responses; mitigated at Cloudflare edge
+10063	IGNORE	Permissions-Policy — Next.js headers() does not inject headers on /_next/static/* file responses; set on all HTML page responses
+90004	IGNORE	Cross-Origin-Resource-Policy / Cross-Origin-Embedder-Policy — set on HTML pages; Next.js cannot inject on raw static asset responses
+10055	IGNORE	CSP unsafe-inline in script-src — required by Next.js App Router for inline hydration; unsafe-eval removed
