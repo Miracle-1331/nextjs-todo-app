@@ -30,12 +30,98 @@ permissions: {}
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # Steps 1-13 · Build · Scan · SBOM · Sign · GitOps update
+  # Step 5 · Check if image already exists in ECR (immutable tags block re-push)
+  # ─────────────────────────────────────────────────────────────────────────────
+  check-image:
+    name: "Check Existing Image"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    outputs:
+      exists: ${{ steps.check.outputs.exists }}
+      digest: ${{ steps.check.outputs.digest }}
+    steps:
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check if image tag already exists in ECR
+        id: check
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ github.sha }}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || echo "")
+          if [ -n "$DIGEST" ] && [ "$DIGEST" != "None" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+            echo "Image already exists: ${DIGEST} — skipping build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            echo "Image not found — will build"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 6 · Build platform images natively in parallel (no QEMU emulation)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: "Build (${{ matrix.suffix }})"
+    needs: check-image
+    if: needs.check-image.outputs.exists == 'false'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: ${{ matrix.platform }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,scope=${{ matrix.suffix }},mode=max
+          provenance: false
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Steps 1-4, 6(merge)-13 · Merge manifest · Scan · SBOM · Sign · GitOps
   # ─────────────────────────────────────────────────────────────────────────────
   release:
-    name: "Build · Scan · Sign · GitOps"
+    name: "Merge · Scan · Sign · GitOps"
+    needs: [check-image, build]
+    if: always() && needs.check-image.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
@@ -56,51 +142,33 @@ jobs:
 
       # ── Step 3 ────────────────────────────────────────────────────────────────
       - name: Login to Amazon ECR
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
       # ── Step 4 ────────────────────────────────────────────────────────────────
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ── Step 5 · Check if tag already exists (immutable tags block re-push) ────
-      - name: Check if image tag already exists in ECR
-        id: check-image
+      # ── Step 6 (merge) · Combine platform images into a multi-arch manifest ──
+      - name: Create and push multi-arch manifest
+        if: needs.check-image.outputs.exists == 'false'
         run: |
-          DIGEST=$(aws ecr describe-images \
-            --repository-name "${{ env.ECR_REPOSITORY }}" \
-            --image-ids imageTag="${{ github.sha }}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text 2>/dev/null || echo "")
-          if [ -n "$DIGEST" ] && [ "$DIGEST" != "None" ]; then
-            echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-            echo "Image tag already exists in ECR: ${DIGEST} — skipping build"
-          else
-            echo "Image tag not found — will build and push"
-          fi
-
-      # ── Step 6 · Build and push (skipped if tag already exists) ──────────────
-      - name: Set up QEMU (for cross-platform builds)
-        if: steps.check-image.outputs.digest == ''
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build and push image
-        id: build
-        if: steps.check-image.outputs.digest == ''
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: true
+          docker buildx imagetools create \
+            --tag "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}-amd64" \
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}-arm64"
 
       - name: Resolve image digest
         id: resolve-digest
         run: |
-          DIGEST="${{ steps.build.outputs.digest }}${{ steps.check-image.outputs.digest }}"
+          if [ "${{ needs.check-image.outputs.exists }}" = "true" ]; then
+            DIGEST="${{ needs.check-image.outputs.digest }}"
+          else
+            DIGEST=$(aws ecr describe-images \
+              --repository-name "${{ env.ECR_REPOSITORY }}" \
+              --image-ids imageTag="${{ github.sha }}" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)
+          fi
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Resolved digest: ${DIGEST}"
 
