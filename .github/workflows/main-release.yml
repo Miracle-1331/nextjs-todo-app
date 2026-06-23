@@ -210,7 +210,7 @@ jobs:
           path: sbom.cdx.json
           retention-days: 90
 
-      # ── Fetch release secrets from Vault (covers steps 9, 11, 12) ────────────
+      # ── Fetch release secrets from Vault (covers steps 11, 12) ─────────────
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@v4
         with:
@@ -223,16 +223,18 @@ jobs:
             CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
             CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           secrets: |
-            kv/data/platform/dependency-track/ci-token token | DTRACK_API_KEY ;
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       # ── Step 9 · Upload SBOM to DependencyTrack ──────────────────────────────
-      - name: Upload SBOM to DependencyTrack and check policy violations
-        env:
-          DTRACK_URL: https://${{ vars.DTRACK_HOSTNAME }}
-          CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-        run: .github/scripts/dtrack-upload.sh sbom.cdx.json "${{ env.APP_NAME }}" "${{ github.sha }}"
+      # Disabled: DependencyTrack instance is hibernated (replicaCount: 0).
+      # Re-enable by restoring the DTRACK_API_KEY secret fetch above and
+      # uncommenting this step when dependency-track is brought back online.
+      # - name: Upload SBOM to DependencyTrack and check policy violations
+      #   env:
+      #     DTRACK_URL: https://${{ vars.DTRACK_HOSTNAME }}
+      #     CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      #     CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+      #   run: .github/scripts/dtrack-upload.sh sbom.cdx.json "${{ env.APP_NAME }}" "${{ github.sha }}"
 
       # ── Step 10 · Sign image digest with Cosign (AWS KMS) ────────────────────
       - name: Install Cosign
