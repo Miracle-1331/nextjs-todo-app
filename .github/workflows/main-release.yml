@@ -13,6 +13,11 @@ concurrency:
   group: main-release-nextjs-todo-app
   cancel-in-progress: false # never cancel a release in flight
 
+# Serialise dev promotions — only one at a time, never cancel an in-flight one.
+# A second push waits until the current promotion finishes.
+# (Declared at workflow level; the job-level concurrency group below matches.)
+
+
 env:
   NODE_VERSION: "24"
   IMAGE_NAME: nextjs-todo-app
@@ -321,19 +326,22 @@ jobs:
   # Step 14 · Argo CD sync dev
   # ─────────────────────────────────────────────────────────────────────────────
   deploy-dev:
-    name: "14 · Deploy Dev"
+    name: "14 · Deploy Dev Candidate"
     runs-on: ubuntu-latest
     needs: release
     environment: dev
     timeout-minutes: 15
     permissions:
       id-token: write
+    outputs:
+      gated: ${{ steps.wait-candidate.outputs.gated }}
     steps:
       - name: Install Argo CD CLI
         run: |
-          curl -sSL \
+          curl -fsSL \
             "https://github.com/argoproj/argo-cd/releases/download/${{ env.ARGOCD_VERSION }}/argocd-linux-amd64" \
-            -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
+            -o /usr/local/bin/argocd
+          chmod +x /usr/local/bin/argocd
 
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@v4
@@ -351,111 +359,83 @@ jobs:
 
       - name: Sync dev application
         run: |
+          set -euo pipefail
           argocd app sync todo-app-dev \
             --server "${{ vars.ARGOCD_SERVER }}" \
-            --auth-token "${{ env.ARGOCD_TOKEN }}" \
+            --auth-token "${ARGOCD_TOKEN}" \
             --grpc-web \
             --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
             --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
-            --prune --timeout 300
+            --prune \
+            --timeout 300
 
-      - name: Wait for dev rollout healthy
+      - name: Wait for canary CI gate
+        id: wait-candidate
+        shell: bash
         run: |
-          for i in $(seq 1 60); do
-            STATUS=$(argocd app get todo-app-dev \
-              --server "${{ vars.ARGOCD_SERVER }}" \
-              --auth-token "${{ env.ARGOCD_TOKEN }}" \
-              --grpc-web \
-              --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
-              --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
-              -o json | jq -r '[.status.health.status, .status.sync.status] | join(" ")')
-            echo "Attempt ${i}/60 — ${STATUS}"
-            [ "$STATUS" = "Healthy Synced" ] && exit 0
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            APP_JSON="$(
+              argocd app get todo-app-dev \
+                --server "${{ vars.ARGOCD_SERVER }}" \
+                --auth-token "${ARGOCD_TOKEN}" \
+                --grpc-web \
+                --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
+                --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
+                --refresh \
+                -o json
+            )"
+            SYNC_STATUS="$(jq -r '.status.sync.status'   <<< "${APP_JSON}")"
+            HEALTH_STATUS="$(jq -r '.status.health.status' <<< "${APP_JSON}")"
+            echo "Attempt ${attempt}/90: ${SYNC_STATUS} ${HEALTH_STATUS}"
+            # Normal canary flow: canary pods ready, rollout paused at CI gate.
+            if [[ "${SYNC_STATUS}" == "Synced" && "${HEALTH_STATUS}" == "Suspended" ]]; then
+              echo "gated=true" >> "${GITHUB_OUTPUT}"
+              echo "Canary is ready and waiting at the CI gate."
+              exit 0
+            fi
+            # First-time installation: no previous stable, rollout skips canary steps.
+            if [[ "${SYNC_STATUS}" == "Synced" && "${HEALTH_STATUS}" == "Healthy" ]]; then
+              echo "gated=false" >> "${GITHUB_OUTPUT}"
+              echo "Rollout is already healthy; no promotion required."
+              exit 0
+            fi
+            if [[ "${HEALTH_STATUS}" == "Degraded" ]]; then
+              echo "Rollout became degraded."
+              exit 1
+            fi
             sleep 10
           done
-          echo "Timed out waiting for Healthy+Synced"
+          echo "Timed out waiting for the canary gate."
           exit 1
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 15 · Mark dev deployed (Argo CD health confirmed — before DAST)
-  # ─────────────────────────────────────────────────────────────────────────────
-  mark-dev-deployed:
-    name: "15 · Mark Dev Deployed"
-    runs-on: ubuntu-latest
-    needs: [release, deploy-dev]
-    timeout-minutes: 5
-    permissions:
-      id-token: write
-    steps:
-      - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v4
-        with:
-          url: ${{ env.VAULT_URL }}
-          method: jwt
-          path: ${{ env.VAULT_AUTH_PATH }}
-          role: gha-agent-ci
-          jwtGithubAudience: ${{ env.VAULT_URL }}
-          extraHeaders: |
-            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          secrets: |
-            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
-
-      - name: Checkout GitOps repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.GITOPS_REPO }}
-          token: ${{ env.GITOPS_TOKEN }}
-          path: _gitops
-
-      - name: Install yq
-        run: |
-          curl -sSL \
-            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
-            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
-
-      - name: Set dev.deployed=true
-        run: |
-          DIGEST="${{ needs.release.outputs.image-digest }}"
-          SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          test -f "$META_FILE"
-          yq -i '.data["dev.deployed"] = "true"' "$META_FILE"
-          cd _gitops
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add "releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          git commit -m "chore: mark dev.deployed=true for ${{ env.APP_NAME }} @ ${{ github.sha }}"
-          git push
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Step 16 · OWASP ZAP baseline DAST against dev endpoint
+  # Step 16 · OWASP ZAP baseline DAST — scans canary only via X-Canary header
   # ─────────────────────────────────────────────────────────────────────────────
   dast-dev:
-    name: "16 · DAST (ZAP baseline) — Dev"
+    name: "16 · DAST (ZAP baseline) — Dev Canary"
     runs-on: ubuntu-latest
     needs: deploy-dev
     environment: dev
     timeout-minutes: 20
     permissions:
       contents: read
-      security-events: write
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: ZAP baseline scan
-        uses: zaproxy/action-baseline@v0.12.0
-        env:
-          CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+      - name: ZAP baseline scan against canary
+        uses: zaproxy/action-baseline@v0.15.0
         with:
           target: ${{ vars.DEV_APP_URL }}
           fail_action: true
+          allow_issue_writing: false
+          artifact_name: zap-dev-report
           rules_file_name: .zap/rules.tsv
           cmd_options: >-
             -j
-            -z "-config replacer.full_list(0).description=CF-Access-Client-Id
+            -z "
+            -config replacer.full_list(0).description=CF-Access-Client-Id
             -config replacer.full_list(0).enabled=true
             -config replacer.full_list(0).matchtype=REQ_HEADER
             -config replacer.full_list(0).matchstr=CF-Access-Client-Id
@@ -464,23 +444,101 @@ jobs:
             -config replacer.full_list(1).enabled=true
             -config replacer.full_list(1).matchtype=REQ_HEADER
             -config replacer.full_list(1).matchstr=CF-Access-Client-Secret
-            -config replacer.full_list(1).replacement=${{ secrets.CF_ACCESS_CLIENT_SECRET }}"
-
-      - name: Upload ZAP report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: zap-dev-report
-          path: report_html.html
-          retention-days: 14
+            -config replacer.full_list(1).replacement=${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+            -config replacer.full_list(2).description=Force-Canary
+            -config replacer.full_list(2).enabled=true
+            -config replacer.full_list(2).matchtype=REQ_HEADER
+            -config replacer.full_list(2).matchstr=X-Canary
+            -config replacer.full_list(2).replacement=always
+            "
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 17 · Mark dev validated (DAST passed)
+  # Step 17 · Resume Rollout after DAST, wait for full progressive delivery
   # ─────────────────────────────────────────────────────────────────────────────
-  mark-dev-validated:
-    name: "17 · Mark Dev Validated"
+  progress-dev:
+    name: "17 · Promote and Validate Dev Rollout"
     runs-on: ubuntu-latest
-    needs: [release, dast-dev]
+    needs: [deploy-dev, dast-dev]
+    environment: dev
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+    steps:
+      - name: Install Argo CD CLI
+        run: |
+          curl -fsSL \
+            "https://github.com/argoproj/argo-cd/releases/download/${{ env.ARGOCD_VERSION }}/argocd-linux-amd64" \
+            -o /usr/local/bin/argocd
+          chmod +x /usr/local/bin/argocd
+
+      - name: Get CI tokens from Vault
+        uses: hashicorp/vault-action@v4
+        with:
+          url: ${{ env.VAULT_URL }}
+          method: jwt
+          path: ${{ env.VAULT_AUTH_PATH }}
+          role: gha-agent-ci
+          jwtGithubAudience: ${{ env.VAULT_URL }}
+          extraHeaders: |
+            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          secrets: |
+            kv/data/platform/argocd/ci-token token | ARGOCD_TOKEN ;
+
+      - name: Resume Rollout after DAST
+        if: needs.deploy-dev.outputs.gated == 'true'
+        run: |
+          set -euo pipefail
+          argocd app actions run todo-app-dev resume \
+            --group argoproj.io \
+            --kind Rollout \
+            --namespace todo-app-dev \
+            --resource-name nextjs-todo-app \
+            --server "${{ vars.ARGOCD_SERVER }}" \
+            --auth-token "${ARGOCD_TOKEN}" \
+            --grpc-web \
+            --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
+            --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}"
+
+      - name: Wait for complete progressive rollout
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 5m + 10m + 15m pauses plus inline analysis time — allow up to 60m total.
+          for attempt in $(seq 1 360); do
+            APP_JSON="$(
+              argocd app get todo-app-dev \
+                --server "${{ vars.ARGOCD_SERVER }}" \
+                --auth-token "${ARGOCD_TOKEN}" \
+                --grpc-web \
+                --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
+                --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
+                --refresh \
+                -o json
+            )"
+            SYNC_STATUS="$(jq -r '.status.sync.status'   <<< "${APP_JSON}")"
+            HEALTH_STATUS="$(jq -r '.status.health.status' <<< "${APP_JSON}")"
+            echo "Attempt ${attempt}/360: ${SYNC_STATUS} ${HEALTH_STATUS}"
+            if [[ "${SYNC_STATUS}" == "Synced" && "${HEALTH_STATUS}" == "Healthy" ]]; then
+              echo "Dev rollout completed successfully."
+              exit 0
+            fi
+            if [[ "${HEALTH_STATUS}" == "Degraded" ]]; then
+              echo "Rollout failed or an AnalysisRun aborted it."
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for the progressive rollout."
+          exit 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 18 · Mark dev deployed + validated (single commit after full rollout)
+  # ─────────────────────────────────────────────────────────────────────────────
+  mark-dev-complete:
+    name: "18 · Mark Dev Complete"
+    runs-on: ubuntu-latest
+    needs: [release, progress-dev]
     timeout-minutes: 5
     permissions:
       id-token: write
@@ -508,20 +566,22 @@ jobs:
 
       - name: Install yq
         run: |
-          curl -sSL \
+          curl -fsSL \
             "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
-            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+            -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
 
-      - name: Set dev.validated=true
+      - name: Set dev.deployed and dev.validated
         run: |
           DIGEST="${{ needs.release.outputs.image-digest }}"
           SAFE_DIGEST="${DIGEST//:/-}"
           META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
           test -f "$META_FILE"
+          yq -i '.data["dev.deployed"]  = "true"' "$META_FILE"
           yq -i '.data["dev.validated"] = "true"' "$META_FILE"
           cd _gitops
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add "releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          git commit -m "chore: mark dev.validated=true for ${{ env.APP_NAME }} @ ${{ github.sha }}"
+          git commit -m "chore: mark dev complete for ${{ env.APP_NAME }} @ ${{ github.sha }}"
           git push
