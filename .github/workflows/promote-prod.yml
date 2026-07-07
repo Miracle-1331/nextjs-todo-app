@@ -1,8 +1,10 @@
 name: Promote to Production
 
 # Stage 4 — Manual production promotion.
-# Requires human approval. Promotes only a QA-validated digest.
-# Does NOT rebuild. Uses canary + metric analysis to reduce blast radius.
+# Does NOT rebuild. Verifies the full signed supply chain (signature, SBOM,
+# build provenance, and the QA-approval issued by promote-qa.yml) BEFORE asking
+# a human to approve. Only a QA-approved digest can reach this point. After a
+# successful prod rollout it signs the final prod-approval record.
 
 on:
   workflow_dispatch:
@@ -20,26 +22,38 @@ concurrency:
 env:
   APP_NAME: nextjs-todo-app
   GITOPS_REPO: ${{ vars.GITOPS_REPO }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_REGION: ap-southeast-1 # must match where main-release builds/pushes
+  COSIGN_KEY: awskms:///alias/extreme-lab-dev-cosign
   VAULT_URL: https://vault.merveilles.org
   VAULT_AUTH_PATH: github-actions
   VAULT_ROLE: gha-agent-ci
-  # Pin toolchain versions for reproducible, tamper-resistant promotions.
   YQ_VERSION: "v4.44.3"
   ARGOCD_VERSION: "v2.13.3"
 
 permissions:
-  id-token: write
-  contents: write
+  contents: read
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 1-2 · Input validation + mandatory human approval
+  # Step 1-6 · Verify the full signed supply-chain BEFORE the human gate.
+  #   image signature + SBOM (cosign/KMS), build provenance (main-release.yml),
+  #   and the qa-approval (gh attestation, signed by promote-qa.yml, env=qa).
+  # qa-approval only exists if promote-qa itself verified dev-approval first, so
+  # "prod requires qa requires dev" is enforced cryptographically end-to-end.
   # ─────────────────────────────────────────────────────────────────────────────
-  require-approval:
-    name: "1-2 · Validate Input & Require Approval"
+  verify-chain:
+    name: "1-6 · Verify Signed Promotion Chain"
     runs-on: ubuntu-latest
-    environment: prod # GitHub Environment "prod" enforces required reviewers
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      id-token: write # AWS OIDC for ECR/KMS read
+      contents: read
+      attestations: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      commit: ${{ steps.meta.outputs.commit }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
@@ -55,90 +69,97 @@ jobs:
           fi
           echo "Digest format OK: $DIGEST"
 
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Verify image signature (Cosign / KMS)
+        run: |
+          cosign verify \
+            --key "${{ env.COSIGN_KEY }}" \
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ inputs.image_digest }}"
+
+      - name: Verify SBOM attestation (Cosign / KMS)
+        run: |
+          cosign verify-attestation \
+            --type cyclonedx \
+            --key "${{ env.COSIGN_KEY }}" \
+            "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ inputs.image_digest }}"
+
+      - name: Verify build provenance (SLSA)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify \
+            "oci://${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ inputs.image_digest }}" \
+            --owner "${{ github.repository_owner }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/main-release.yml" \
+            --predicate-type "https://slsa.dev/provenance/v1"
+
+      - name: Verify qa-approval record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Requires a .../promotion/qa/v1 attestation for THIS digest, signed by
+          # promote-qa.yml — which is only produced after QA E2E/smoke/DAST pass
+          # AND promote-qa verified the dev-approval. This is the prod gate.
+          gh attestation verify \
+            "oci://${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}@${{ inputs.image_digest }}" \
+            --owner "${{ github.repository_owner }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/promote-qa.yml" \
+            --predicate-type "https://extreme-lab.dev/promotion/qa/v1"
+
+      - name: Resolve promoted tag from ECR
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG=$(aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --image-ids imageDigest="${{ inputs.image_digest }}" \
+            --query 'imageDetails[0].imageTags[0]' --output text)
+          if [ -z "$TAG" ] || [ "$TAG" = "None" ]; then
+            echo "ERROR: no tag found in ECR for digest ${{ inputs.image_digest }}"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "commit=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Verified & resolved tag ${TAG} for ${{ inputs.image_digest }}"
+
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 3-6 · Checkout GitOps + validate QA gates
+  # Step 7 · Human approval gate — only reached once the chain is fully verified.
+  # The "prod" GitHub Environment enforces required reviewers here.
   # ─────────────────────────────────────────────────────────────────────────────
-  validate-gates:
-    name: "3-6 · Validate QA Gates"
+  approve-prod:
+    name: "7 · Human Approval"
     runs-on: ubuntu-latest
-    needs: require-approval
-    timeout-minutes: 10
+    needs: verify-chain
+    environment: prod
+    timeout-minutes: 60
     steps:
-      - name: Harden runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
-        with:
-          egress-policy: audit
-
-      - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
-        with:
-          url: ${{ env.VAULT_URL }}
-          method: jwt
-          path: ${{ env.VAULT_AUTH_PATH }}
-          role: ${{ env.VAULT_ROLE }}
-          jwtGithubAudience: ${{ env.VAULT_URL }}
-          extraHeaders: |
-            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          secrets: |
-            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
-
-      - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: ${{ env.GITOPS_REPO }}
-          token: ${{ env.GITOPS_TOKEN }}
-
-      - name: Install yq
+      - name: Record approval
         run: |
-          curl -sSL \
-            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
-            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
-
-      - name: Step 4 — Release metadata exists
-        run: |
-          DIGEST="${{ inputs.image_digest }}"
-          SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          if [ ! -f "$META_FILE" ]; then
-            echo "ERROR: No release metadata for digest ${DIGEST}"
-            echo "This digest was not produced by the official pipeline."
-            exit 1
-          fi
-          echo "Release metadata found: $META_FILE"
-
-      - name: Step 5 — qa.deployed=true
-        run: |
-          DIGEST="${{ inputs.image_digest }}"
-          SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          QA_DEPLOYED=$(yq '.data["qa.deployed"]' "$META_FILE")
-          if [ "$QA_DEPLOYED" != "true" ]; then
-            echo "ERROR: qa.deployed is '${QA_DEPLOYED}' — digest was not deployed to QA."
-            exit 1
-          fi
-          echo "qa.deployed=true ✓"
-
-      - name: Step 6 — qa.validated=true
-        run: |
-          DIGEST="${{ inputs.image_digest }}"
-          SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          QA_VALIDATED=$(yq '.data["qa.validated"]' "$META_FILE")
-          if [ "$QA_VALIDATED" != "true" ]; then
-            echo "ERROR: qa.validated is '${QA_VALIDATED}' — QA tests did not pass."
-            exit 1
-          fi
-          echo "qa.validated=true ✓"
+          echo "Supply chain verified (sig ✓ SBOM ✓ provenance ✓ qa-approval ✓)."
+          echo "Approved by required reviewer for digest ${{ inputs.image_digest }}."
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 7-8 · Update prod values + create GitOps PR (CODEOWNERS review required)
+  # Step 8-9 · Update prod values + create GitOps PR (CODEOWNERS review required)
   # ─────────────────────────────────────────────────────────────────────────────
   update-prod-values:
-    name: "7-8 · Update Prod Values"
+    name: "8-9 · Update Prod Values"
     runs-on: ubuntu-latest
-    needs: validate-gates
+    needs: [verify-chain, approve-prod]
     timeout-minutes: 10
+    permissions:
+      id-token: write # Vault JWT auth
+      contents: read
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
@@ -171,14 +192,13 @@ jobs:
             "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
             -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
 
-      - name: Step 7 — Update values/prod.yaml with promoted digest
+      - name: Step 8 — Update values/prod.yaml with verified digest + tag
         run: |
-          DIGEST="${{ inputs.image_digest }}"
-          COMMIT=$(yq ".data.commit" "releases/${{ env.APP_NAME }}/${DIGEST//:/-}.yaml")
-          yq -i ".image.digest = \"${DIGEST}\"" "workloads/todo-app/prod/values.yaml"
+          COMMIT="${{ needs.verify-chain.outputs.commit }}"
+          yq -i ".image.digest = \"${{ inputs.image_digest }}\"" "workloads/todo-app/prod/values.yaml"
           yq -i ".image.tag = \"${COMMIT}\"" "workloads/todo-app/prod/values.yaml"
 
-      - name: Step 8 — Create production GitOps PR
+      - name: Step 9 — Create production GitOps PR
         run: |
           BRANCH="promote/${{ env.APP_NAME }}/prod/${{ inputs.image_digest }}"
           BRANCH="${BRANCH:0:100}"
@@ -194,7 +214,7 @@ jobs:
             --body "**Production promotion** of digest \`${{ inputs.image_digest }}\`.
           - Promoted by: ${{ github.actor }}
           - Pipeline run: ${{ github.run_id }}
-          - QA gates: dev.deployed ✓ dev.validated ✓ qa.deployed ✓ qa.validated ✓
+          - Supply chain verified: signature ✓ SBOM ✓ provenance ✓ qa-approval ✓
 
           Requires CODEOWNERS approval before merge." \
             --base main \
@@ -203,14 +223,16 @@ jobs:
           GH_TOKEN: ${{ env.GITOPS_TOKEN }}
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 9-10 · Argo CD sync prod + production canary rollout
+  # Step 10-11 · Argo CD sync prod + production canary rollout
   # ─────────────────────────────────────────────────────────────────────────────
   deploy-prod:
-    name: "9-10 · Deploy Prod + Canary"
+    name: "10-11 · Deploy Prod + Canary"
     runs-on: ubuntu-latest
     needs: update-prod-values
     environment: prod
     timeout-minutes: 15
+    permissions:
+      id-token: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
@@ -265,7 +287,6 @@ jobs:
       #         --namespace prod --timeout 1200
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 11 · Metric analysis (reported by AnalysisTemplate — gate inside rollout)
   # Step 12 · Smoke test against production
   # ─────────────────────────────────────────────────────────────────────────────
   smoke-prod:
@@ -303,6 +324,8 @@ jobs:
     needs: smoke-prod
     if: always()
     timeout-minutes: 5
+    permissions:
+      id-token: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
@@ -356,54 +379,48 @@ jobs:
             }
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 14 · Mark prod.deployed=true and prod.validated=true
+  # Step 14 · Sign the final prod-approval record (keyless, GitHub OIDC).
+  # Completes the attestation chain: dev → qa → prod, all bound to the digest.
   # ─────────────────────────────────────────────────────────────────────────────
-  mark-prod-validated:
-    name: "14 · Mark Prod Validated"
+  attest-prod-approval:
+    name: "14 · Attest Prod Approval"
     runs-on: ubuntu-latest
-    needs: smoke-prod
+    needs: [verify-chain, smoke-prod]
     timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
         with:
           egress-policy: audit
 
-      - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
-        with:
-          url: ${{ env.VAULT_URL }}
-          method: jwt
-          path: ${{ env.VAULT_AUTH_PATH }}
-          role: ${{ env.VAULT_ROLE }}
-          jwtGithubAudience: ${{ env.VAULT_URL }}
-          extraHeaders: |
-            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          secrets: |
-            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
-
-      - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: ${{ env.GITOPS_REPO }}
-          token: ${{ env.GITOPS_TOKEN }}
-
-      - name: Install yq
+      - name: Build prod-approval predicate
         run: |
-          curl -sSL \
-            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
-            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+          set -euo pipefail
+          cat > approval.json <<EOF
+          {
+            "environment": "prod",
+            "requires": "qa",
+            "image": "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}",
+            "digest": "${{ inputs.image_digest }}",
+            "tag": "${{ needs.verify-chain.outputs.tag }}",
+            "commit": "${{ needs.verify-chain.outputs.commit }}",
+            "source_repo": "${{ github.repository }}",
+            "run_id": "${{ github.run_id }}",
+            "promoted_by": "${{ github.actor }}",
+            "validated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "evidence": { "smoke": "passed" }
+          }
+          EOF
 
-      - name: Set prod.deployed=true and prod.validated=true
-        run: |
-          DIGEST="${{ inputs.image_digest }}"
-          SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          yq -i '.data["prod.deployed"] = "true"' "$META_FILE"
-          yq -i '.data["prod.validated"] = "true"' "$META_FILE"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add "$META_FILE"
-          git commit -m "chore: mark prod.validated=true for ${{ env.APP_NAME }} @ ${DIGEST}"
-          git push
+      - name: Sign prod-approval attestation
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          subject-digest: ${{ inputs.image_digest }}
+          predicate-type: https://extreme-lab.dev/promotion/prod/v1
+          predicate-path: approval.json
+          push-to-registry: false

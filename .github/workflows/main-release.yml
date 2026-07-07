@@ -308,7 +308,11 @@ jobs:
           subject-digest: ${{ steps.resolve-digest.outputs.digest }}
           push-to-registry: false
 
-      # ── Step 12 · Write release metadata to GitOps repo ──────────────────────
+      # ── Checkout GitOps repo (to update the dev image values) ────────────────
+      # NOTE: the old release-metadata ConfigMap ledger (dev.validated=true …)
+      # has been removed. The promotion gate is now a signed attestation chain,
+      # not a mutable file in git: see `attest-dev-approval` below, and the
+      # `verify-chain` jobs in promote-qa / promote-prod.
       - name: Checkout GitOps repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -316,40 +320,7 @@ jobs:
           token: ${{ env.GITOPS_TOKEN }}
           path: _gitops
 
-      - name: Write release metadata
-        run: |
-          DIGEST="${{ steps.resolve-digest.outputs.digest }}"
-          SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          mkdir -p "_gitops/releases/${{ env.APP_NAME }}"
-          cat > "$META_FILE" <<EOF
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: release-${{ env.APP_NAME }}-${SAFE_DIGEST}
-            labels:
-              app: ${{ env.APP_NAME }}
-          data:
-            commit: "${{ github.sha }}"
-            digest: "${DIGEST}"
-            source_repo: "${{ github.repository }}"
-            pipeline_run: "${{ github.run_id }}"
-            built_at: "${{ github.event.head_commit.timestamp }}"
-            dev.deployed: "false"
-            dev.validated: "false"
-            qa.deployed: "false"
-            qa.validated: "false"
-            prod.deployed: "false"
-            prod.validated: "false"
-          EOF
-          cd _gitops
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add .
-          git commit -m "chore: release metadata for ${{ env.APP_NAME }} @ ${{ github.sha }}"
-          git push
-
-      # ── Step 13 · Update dev values in GitOps repo ───────────────────────────
+      # ── Update dev values in GitOps repo ─────────────────────────────────────
       - name: Install yq
         run: |
           curl -sSL \
@@ -598,60 +569,52 @@ jobs:
           exit 1
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 18 · Mark dev deployed + validated (single commit after full rollout)
+  # Step 18 · Attest dev approval (keyless, GitHub OIDC)
+  # Signs a "passed dev" promotion record bound to the image digest, issued by
+  # THIS workflow's identity. promote-qa's verify-chain requires this exact
+  # attestation before it will promote — replaces the old mutable git ledger.
   # ─────────────────────────────────────────────────────────────────────────────
-  mark-dev-complete:
-    name: "18 · Mark Dev Complete"
+  attest-dev-approval:
+    name: "18 · Attest Dev Approval"
     runs-on: ubuntu-latest
     needs: [release, progress-dev]
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
-      id-token: write
+      id-token: write # keyless signing via Fulcio
+      attestations: write # write to the GitHub attestation store
+      contents: read
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
         with:
           egress-policy: audit
 
-      - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
-        with:
-          url: ${{ env.VAULT_URL }}
-          method: jwt
-          path: ${{ env.VAULT_AUTH_PATH }}
-          role: gha-agent-ci
-          jwtGithubAudience: ${{ env.VAULT_URL }}
-          extraHeaders: |
-            CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-            CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          secrets: |
-            kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
-
-      - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: ${{ env.GITOPS_REPO }}
-          token: ${{ env.GITOPS_TOKEN }}
-          path: _gitops
-
-      - name: Install yq
+      - name: Build dev-approval predicate
+        id: predicate
         run: |
-          curl -fsSL \
-            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
-            -o /usr/local/bin/yq
-          chmod +x /usr/local/bin/yq
-
-      - name: Set dev.deployed and dev.validated
-        run: |
+          set -euo pipefail
           DIGEST="${{ needs.release.outputs.image-digest }}"
-          SAFE_DIGEST="${DIGEST//:/-}"
-          META_FILE="_gitops/releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          test -f "$META_FILE"
-          yq -i '.data["dev.deployed"]  = "true"' "$META_FILE"
-          yq -i '.data["dev.validated"] = "true"' "$META_FILE"
-          cd _gitops
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add "releases/${{ env.APP_NAME }}/${SAFE_DIGEST}.yaml"
-          git commit -m "chore: mark dev complete for ${{ env.APP_NAME }} @ ${{ github.sha }}"
-          git push
+          cat > approval.json <<EOF
+          {
+            "environment": "dev",
+            "image": "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}",
+            "digest": "${DIGEST}",
+            "tag": "${{ github.sha }}",
+            "commit": "${{ github.sha }}",
+            "source_repo": "${{ github.repository }}",
+            "run_id": "${{ github.run_id }}",
+            "run_attempt": "${{ github.run_attempt }}",
+            "validated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "evidence": { "dev_rollout": "healthy", "dast_baseline": "passed" }
+          }
+          EOF
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign dev-approval attestation
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          subject-digest: ${{ steps.predicate.outputs.digest }}
+          predicate-type: https://extreme-lab.dev/promotion/dev/v1
+          predicate-path: approval.json
+          push-to-registry: false
