@@ -6,10 +6,22 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    # Only analyse when JS/TS source (or its dependencies) changes.
+    paths: &code-paths
+      - "**/*.js"
+      - "**/*.jsx"
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.mjs"
+      - "**/*.cjs"
+      - "package.json"
+      - "package-lock.json"
   pull_request:
     branches: [main]
+    paths: *code-paths
   schedule:
-    # Weekly full scan (Mondays 06:17 UTC) to catch newly published CVE rules.
+    # Weekly full scan (Mondays 06:17 UTC) to catch newly published CVE rules,
+    # regardless of what changed — this is the safety net for the path filter.
     - cron: "17 6 * * 1"
 
 concurrency:
@@ -32,8 +44,15 @@ jobs:
       matrix:
         language: [javascript-typescript]
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4

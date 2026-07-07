@@ -11,6 +11,10 @@ on:
     - cron: "23 4 * * 1" # weekly, Mondays 04:23 UTC
   push:
     branches: [main]
+    # Scorecard grades repo/CI configuration — only re-run on config changes.
+    # The weekly schedule and branch_protection_rule cover everything else.
+    paths:
+      - ".github/**"
 
 # Least-privilege by default; the job below elevates only what it needs.
 permissions: read-all
@@ -24,6 +28,11 @@ jobs:
       security-events: write # upload SARIF to code scanning
       id-token: write # publish results to the public OpenSSF API
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
