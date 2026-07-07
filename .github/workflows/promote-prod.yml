@@ -12,15 +12,20 @@ on:
         required: true
         type: string
 
+# Serialise production promotions — only one may touch prod GitOps state at a time.
+concurrency:
+  group: promote-prod-nextjs-todo-app
+  cancel-in-progress: false
+
 env:
   APP_NAME: nextjs-todo-app
   GITOPS_REPO: ${{ vars.GITOPS_REPO }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  AWS_REGION: ap-northeast-1
   VAULT_URL: https://vault.merveilles.org
   VAULT_AUTH_PATH: github-actions
   VAULT_ROLE: gha-agent-ci
+  # Pin toolchain versions for reproducible, tamper-resistant promotions.
+  YQ_VERSION: "v4.44.3"
+  ARGOCD_VERSION: "v2.13.3"
 
 permissions:
   id-token: write
@@ -33,8 +38,14 @@ jobs:
   require-approval:
     name: "1-2 · Validate Input & Require Approval"
     runs-on: ubuntu-latest
-    environment: prod   # GitHub Environment "prod" enforces required reviewers
+    environment: prod # GitHub Environment "prod" enforces required reviewers
+    timeout-minutes: 10
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Validate digest format
         run: |
           DIGEST="${{ inputs.image_digest }}"
@@ -51,7 +62,13 @@ jobs:
     name: "3-6 · Validate QA Gates"
     runs-on: ubuntu-latest
     needs: require-approval
+    timeout-minutes: 10
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
@@ -75,7 +92,7 @@ jobs:
       - name: Install yq
         run: |
           curl -sSL \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
             -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
 
       - name: Step 4 — Release metadata exists
@@ -121,7 +138,13 @@ jobs:
     name: "7-8 · Update Prod Values"
     runs-on: ubuntu-latest
     needs: validate-gates
+    timeout-minutes: 10
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
@@ -145,7 +168,7 @@ jobs:
       - name: Install yq
         run: |
           curl -sSL \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
             -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
 
       - name: Step 7 — Update values/prod.yaml with promoted digest
@@ -187,11 +210,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: update-prod-values
     environment: prod
+    timeout-minutes: 15
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Install Argo CD CLI
         run: |
           curl -sSL \
-            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 \
+            "https://github.com/argoproj/argo-cd/releases/download/${{ env.ARGOCD_VERSION }}/argocd-linux-amd64" \
             -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
 
       - name: Get CI tokens from Vault
@@ -243,7 +272,13 @@ jobs:
     name: "12 · Smoke Test — Prod"
     runs-on: ubuntu-latest
     needs: deploy-prod
+    timeout-minutes: 10
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Health check
         run: |
           URL="${{ vars.PROD_APP_URL }}"
@@ -267,7 +302,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: smoke-prod
     if: always()
+    timeout-minutes: 5
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
@@ -321,7 +362,13 @@ jobs:
     name: "14 · Mark Prod Validated"
     runs-on: ubuntu-latest
     needs: smoke-prod
+    timeout-minutes: 10
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
@@ -345,7 +392,7 @@ jobs:
       - name: Install yq
         run: |
           curl -sSL \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64" \
             -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
 
       - name: Set prod.deployed=true and prod.validated=true

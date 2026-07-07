@@ -8,14 +8,30 @@ name: Main Release
 on:
   push:
     branches: [main]
+    # Allow-list: only (re)build + deploy when something that goes INTO the image
+    # or the deployment actually changes. Editing docs, workflows, or test-only
+    # config no longer ships a new image and redeploys. Anything not listed here
+    # is treated as non-shipping. Use the manual trigger to force a re-release.
+    paths:
+      - "src/**"
+      - "public/**"
+      - "package.json"
+      - "package-lock.json"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "next.config.ts"
+      - "tsconfig.json"
+      - "migrations/**"
+  # Manual escape hatch — re-release the current main HEAD without a code change
+  # (e.g. after changing this workflow, or to redeploy an existing digest).
+  workflow_dispatch: {}
 
 concurrency:
   group: main-release-nextjs-todo-app
   cancel-in-progress: false # never cancel a release in flight
 
-# Serialise dev promotions — only one at a time, never cancel an in-flight one.
-# A second push waits until the current promotion finishes.
-# (Declared at workflow level; the job-level concurrency group below matches.)
+# Serialise releases — only one at a time, never cancel an in-flight one.
+# A second qualifying push waits until the current release finishes.
 
 env:
   NODE_VERSION: "24"
@@ -46,6 +62,11 @@ jobs:
       exists: ${{ steps.check.outputs.exists }}
       digest: ${{ steps.check.outputs.digest }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
@@ -101,6 +122,8 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -150,6 +173,8 @@ jobs:
       # ── Step 1 ────────────────────────────────────────────────────────────────
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # ── Step 2 ────────────────────────────────────────────────────────────────
       - name: Configure AWS credentials (GitHub OIDC)
@@ -359,6 +384,11 @@ jobs:
     outputs:
       gated: ${{ steps.wait-candidate.outputs.gated }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Install Argo CD CLI
         run: |
           curl -fsSL \
@@ -444,8 +474,15 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: ZAP baseline scan against canary
         uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
@@ -487,6 +524,11 @@ jobs:
     permissions:
       id-token: write
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Install Argo CD CLI
         run: |
           curl -fsSL \
@@ -566,6 +608,11 @@ jobs:
     permissions:
       id-token: write
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Get CI tokens from Vault
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:

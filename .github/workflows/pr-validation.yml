@@ -3,6 +3,11 @@ name: PR Validation
 # Stage 1 — Validate code before merge.
 # Triggered on any PR targeting main (feature/*, bugfix/*, hotfix/*).
 # Does NOT build official artifacts or deploy.
+#
+# Path-aware: a `changes` detect job classifies the diff into groups
+# (app / tests / ci) and the heavy jobs run only when their group changed.
+# The `PR Validated` gate ALWAYS runs and reports, so it stays valid as a
+# required status check even on docs-only PRs (skipped jobs count as passing).
 
 # Public repo → GitHub-hosted runner minutes are free, so validate every PR.
 on:
@@ -25,17 +30,70 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # Step 0 — Lint all workflow files (actionlint)
+  # Detect which groups of files changed. Downstream jobs gate on these outputs
+  # so a docs-only or workflow-only PR doesn't run the full test/build/scan suite.
+  #   app   → source/build inputs that affect the image or app behaviour
+  #   tests → test suites and their configs
+  #   ci    → workflow / automation config
+  # ─────────────────────────────────────────────────────────────────────────────
+  changes:
+    name: "Detect changed paths"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      tests: ${{ steps.filter.outputs.tests }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - name: Classify changed files
+        id: filter
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        with:
+          filters: |
+            app:
+              - 'src/**'
+              - 'public/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'next.config.ts'
+              - 'tsconfig.json'
+              - 'migrations/**'
+            tests:
+              - 'e2e/**'
+              - 'jest.config.ts'
+              - 'playwright.config.ts'
+              - 'eslint.config.mjs'
+            ci:
+              - '.github/workflows/**'
+              - '.github/dependabot.yml'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 0 — Lint all workflow files (actionlint). Runs only when CI config changed.
   # Catches invalid action refs, bad expressions, type errors before anything runs.
   # ─────────────────────────────────────────────────────────────────────────────
   actionlint:
     name: "0 · Lint Workflows"
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ci == 'true'
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Run actionlint
         uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d # v1
@@ -44,13 +102,24 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 1-5 — Checkout · Runtime · Install · Unit tests + coverage · Lint
+  # Runs when app source or test suites changed.
   # ─────────────────────────────────────────────────────────────────────────────
   test:
     name: "1-5 · Unit Tests & Lint"
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || needs.changes.outputs.tests == 'true'
+    timeout-minutes: 15
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -82,18 +151,26 @@ jobs:
   sonar:
     name: "6 · SonarQube Quality Gate"
     # Disabled by default. Enable by setting repo variable ENABLE_SONAR=true.
-    # (A repo variable, not a constant `if: false`, so actionlint stays happy.)
-    if: ${{ vars.ENABLE_SONAR == 'true' }}
+    # Runs only when app/test files changed (its condition is a subset of `test`'s,
+    # so whenever it runs, the `test` job it depends on ran and succeeded too).
+    if: ${{ vars.ENABLE_SONAR == 'true' && (needs.changes.outputs.app == 'true' || needs.changes.outputs.tests == 'true') }}
     runs-on: ubuntu-latest
-    needs: test
+    needs: [changes, test]
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # required for Vault JWT auth
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -145,18 +222,28 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 7 — Trivy FS scan: secrets · dep vulns · IaC misconfigs
-  # Blocking: fails on HIGH/CRITICAL or any secret
+  # Runs when app OR ci config changed (covers Dockerfile, IaC and workflow files).
+  # Blocking: fails on HIGH/CRITICAL or any secret.
   # ─────────────────────────────────────────────────────────────────────────────
   trivy-fs:
     name: "7 · Trivy FS Scan"
     runs-on: ubuntu-latest
-    needs: test
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || needs.changes.outputs.ci == 'true'
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write # upload SARIF to code scanning (free on public repos)
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # Blocking scan — table format, exits 1 on HIGH/CRITICAL findings
       - name: Trivy — secrets, vulns, misconfig (blocking)
@@ -201,18 +288,27 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step 8 — Docker build check + Trivy image scan
-  # Confirms the Dockerfile builds and the resulting image is clean.
-  # Does NOT push — local image only.
+  # Runs only when app source changed. Confirms the Dockerfile builds and the
+  # resulting image is clean. Does NOT push — local image only.
   # ─────────────────────────────────────────────────────────────────────────────
   docker-build-check:
     name: "8 · Docker Build Check"
     runs-on: ubuntu-latest
-    needs: [test, trivy-fs]
+    needs: [changes, test, trivy-fs]
+    if: needs.changes.outputs.app == 'true'
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -231,16 +327,25 @@ jobs:
   # Step 9 — Dependency Review: block PRs that introduce vulnerable or
   # disallowed-license dependencies. Native to GitHub, free on public repos.
   # Requires the dependency graph to be enabled on the repo.
+  # Always runs on PRs — trivially fast when no manifest changed.
   # ─────────────────────────────────────────────────────────────────────────────
   dependency-review:
     name: "9 · Dependency Review"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Review dependency changes
         uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
@@ -251,7 +356,8 @@ jobs:
           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Summary gate — configure as a required status check in branch protection
+  # Summary gate — configure as a required status check in branch protection.
+  # Always runs so the required check reports on every PR (skipped jobs pass).
   # ─────────────────────────────────────────────────────────────────────────────
   pr-validated:
     name: PR Validated
@@ -259,6 +365,7 @@ jobs:
     needs:
       [actionlint, test, sonar, trivy-fs, docker-build-check, dependency-review]
     if: always()
+    timeout-minutes: 5
     steps:
       - name: Verify all required jobs passed
         run: |
