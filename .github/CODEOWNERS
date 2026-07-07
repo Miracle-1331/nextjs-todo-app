@@ -1,0 +1,16 @@
+# Code owners — automatically requested for review on matching paths.
+
+# Requires "Require review from Code Owners" in branch protection to enforce.
+
+# Docs: https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything in the repo.
+
+*                       @Miracle-1331
+
+# CI/CD and security-sensitive config get explicit ownership.
+
+/.github/ @Miracle-1331
+/Dockerfile @Miracle-1331
+/sonar-project.properties @Miracle-1331
+/.zap/ @Miracle-1331

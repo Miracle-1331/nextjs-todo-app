@@ -53,7 +53,7 @@ jobs:
     needs: require-approval
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v4
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -67,7 +67,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
@@ -123,7 +123,7 @@ jobs:
     needs: validate-gates
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v4
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -137,7 +137,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
@@ -195,7 +195,7 @@ jobs:
             -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
 
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v4
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -269,7 +269,7 @@ jobs:
     if: always()
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v4
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -297,7 +297,7 @@ jobs:
           echo "msg=${MSG}" >> "$GITHUB_OUTPUT"
 
       - name: Send Slack notification
-        uses: slackapi/slack-github-action@v2.0.0
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           webhook: ${{ env.SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
@@ -323,7 +323,7 @@ jobs:
     needs: smoke-prod
     steps:
       - name: Get CI tokens from Vault
-        uses: hashicorp/vault-action@v4
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
           url: ${{ env.VAULT_URL }}
           method: jwt
@@ -337,7 +337,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
