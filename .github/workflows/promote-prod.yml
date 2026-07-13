@@ -67,7 +67,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
@@ -137,7 +137,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
@@ -297,7 +297,7 @@ jobs:
           echo "msg=${MSG}" >> "$GITHUB_OUTPUT"
 
       - name: Send Slack notification
-        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        uses: slackapi/slack-github-action@0d95c9a7becc1e6e297d76df9bc735c44f4cbcbc # v3.0.5
         with:
           webhook: ${{ env.SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
@@ -337,7 +337,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
