@@ -68,7 +68,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
@@ -138,7 +138,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
@@ -241,10 +241,10 @@ jobs:
       NODE_VERSION: "24"
     steps:
       - name: Checkout source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -261,7 +261,7 @@ jobs:
           BASE_URL: ${{ vars.QA_APP_URL }}
 
       - name: Upload Playwright report
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: playwright-report-qa
@@ -302,7 +302,7 @@ jobs:
       security-events: write
     steps:
       - name: ZAP full scan
-        uses: zaproxy/action-full-scan@0f8503472afc3d03963d42a593629622d1a8c13b # v0.11.0
+        uses: zaproxy/action-full-scan@3c58388149901b9a03b7718852c5ba889646c27c # v0.13.0
         with:
           target: ${{ vars.QA_APP_URL }}
           fail_action: true
@@ -310,7 +310,7 @@ jobs:
           cmd_options: "-j"
 
       - name: Upload ZAP report
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: zap-qa-report
@@ -340,7 +340,7 @@ jobs:
             kv/data/platform/github/gitops-token token | GITOPS_TOKEN ;
 
       - name: Checkout GitOps repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: ${{ env.GITOPS_REPO }}
           token: ${{ env.GITOPS_TOKEN }}
